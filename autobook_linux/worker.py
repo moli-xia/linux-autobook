@@ -6,13 +6,11 @@ race-free against the site's next_pending() selection.
 """
 from __future__ import annotations
 
-import io
 import logging
 import sys
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from autobook_linux.baidu_auth import BaiduCredentialStore, resolve_baidu_credentials
@@ -106,20 +104,19 @@ class Worker:
             if once:
                 break
 
-        if once:
+        if once or self._stop.is_set():
             while self._active:
                 self._reap()
                 time.sleep(1)
+            self.executor.shutdown(wait=True, cancel_futures=False)
         return 0
 
     def stop(self) -> None:
         self._stop.set()
-        self.executor.shutdown(wait=False, cancel_futures=False)
 
     # ------------------------------------------------------------------
     def _run_task(self, task: dict) -> None:
         token = str(task.get("token") or "")
-        log_buffer = io.StringIO()
 
         def progress(message: str) -> None:
             LOGGER.info("[#%s] %s", task.get("id"), message)
@@ -127,20 +124,20 @@ class Worker:
                 self.site.progress(token, message)
 
         try:
-            with redirect_stdout(log_buffer), redirect_stderr(log_buffer):
-                result = self.pipeline.process(task, progress_cb=progress)
-            raw = log_buffer.getvalue()
+            # redirect_stdout mutates process-global state and is unsafe when
+            # multiple conversion threads overlap. Keep converter output in
+            # the shared service journal instead.
+            result = self.pipeline.process(task, progress_cb=progress)
             self.site.complete(
                 token,
                 worker_status="completed",
                 result_url=result["share_url"],
                 result_file=str(result["pdf"]),
                 message="文献传递完成。",
-                raw_output=raw,
+                raw_output="",
             )
             LOGGER.info("任务 #%s 完成: %s", task.get("id"), result["share_url"])
         except Exception as exc:
-            raw = log_buffer.getvalue()
             LOGGER.exception("任务 #%s 失败: %s", task.get("id"), exc)
             if token:
                 try:
@@ -148,7 +145,7 @@ class Worker:
                         token,
                         worker_status="failed",
                         message=str(exc)[:600],
-                        raw_output=(raw + "\n" + str(exc))[-60000:],
+                        raw_output=str(exc)[-60000:],
                     )
                 except Exception:
                     LOGGER.exception("任务 #%s 失败回报也未成功", task.get("id"))

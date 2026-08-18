@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import signal
 import sys
 from pathlib import Path
 
@@ -58,6 +59,13 @@ def main() -> int:
         count = worker.index.sync(worker.pipeline.gid, incremental=not args.full)
         print(f"索引同步完成，写入 {count} 条。")
         return 0
+
+    def request_stop(signum, _frame) -> None:
+        logging.getLogger(__name__).info("收到信号 %s，停止领取新任务并等待活动任务结束", signum)
+        worker.stop()
+
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
     return worker.run(once=args.once)
 
 

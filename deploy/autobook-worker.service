@@ -9,7 +9,7 @@ WorkingDirectory=/opt/autobook-linux
 ExecStart=/opt/autobook-linux/.venv/bin/python /opt/autobook-linux/run_worker.py
 Restart=always
 RestartSec=10
-TimeoutStopSec=120
+TimeoutStopSec=1800
 KillSignal=SIGTERM
 Environment=PYTHONUNBUFFERED=1
 
