@@ -1,0 +1,17 @@
+[Unit]
+Description=linux-autobook concurrent document-delivery worker
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/autobook-linux
+ExecStart=/opt/autobook-linux/.venv/bin/python /opt/autobook-linux/run_worker.py
+Restart=always
+RestartSec=10
+TimeoutStopSec=120
+KillSignal=SIGTERM
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

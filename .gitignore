@@ -1,0 +1,38 @@
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+password.txt
+*.pem
+*.key
+
+# Runtime data and downloaded documents
+runtime/
+downloads/
+work/
+*.pdf
+*.pdg
+*.uvz
+*.rar
+*.7z
+*.zip
+*.cbz
+*.aria2
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+coverage.xml
+.coverage
+
+# Editors and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
