@@ -180,8 +180,8 @@ class Config:
                 missing.append("BAIDU_GATEWAY_URL 必须使用 https://")
             if not self.baidu_gateway_token:
                 missing.append("BAIDU_GATEWAY_TOKEN")
-            if not self.baidu_gateway_ca_file or not self.baidu_gateway_ca_file.is_file():
-                missing.append("BAIDU_GATEWAY_CA_FILE（网关证书）")
+            if self.baidu_gateway_ca_file and not self.baidu_gateway_ca_file.is_file():
+                missing.append("BAIDU_GATEWAY_CA_FILE（指定的网关证书不存在）")
         elif bool(self.bduss) != bool(self.stoken):
             missing.append("BAIDU_BDUSS 与 BAIDU_STOKEN 必须同时设置")
         elif not self.bduss and not self.baidu_auth_file.is_file():

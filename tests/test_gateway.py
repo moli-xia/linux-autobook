@@ -65,7 +65,7 @@ class GatewayProtocolTests(unittest.TestCase):
                 client = BaiduGatewayClient(
                     f"http://127.0.0.1:{server.server_port}",
                     "secret-token",
-                    root / "unused-ca.pem",
+                    None,
                     timeout_seconds=10,
                     poll_seconds=1,
                 )
@@ -90,7 +90,7 @@ class GatewayProtocolTests(unittest.TestCase):
                 client = BaiduGatewayClient(
                     f"http://127.0.0.1:{server.server_port}",
                     "wrong",
-                    root / "unused-ca.pem",
+                    None,
                 )
                 with self.assertRaises(GatewayError):
                     client.fetch("12345678", "task-1-lease", root / "downloads")

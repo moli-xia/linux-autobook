@@ -2,6 +2,8 @@
 Description=linux-autobook concurrent document-delivery worker
 Wants=network-online.target
 After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -10,8 +12,9 @@ Group=autobook
 WorkingDirectory=/opt/autobook-linux
 EnvironmentFile=/etc/linux-autobook/worker.env
 ExecStart=/opt/autobook-linux/.venv/bin/python /opt/autobook-linux/run_worker.py
-Restart=always
-RestartSec=10
+Restart=on-failure
+RestartPreventExitStatus=78
+RestartSec=20
 TimeoutStopSec=1800
 KillSignal=SIGTERM
 Environment=PYTHONUNBUFFERED=1

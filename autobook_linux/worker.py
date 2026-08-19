@@ -32,7 +32,6 @@ class Worker:
         self.index: LibraryIndex | None = None
         self.gateway: BaiduGatewayClient | None = None
         if config.baidu_gateway_url:
-            assert config.baidu_gateway_ca_file is not None
             self.gateway = BaiduGatewayClient(
                 config.baidu_gateway_url,
                 config.baidu_gateway_token,

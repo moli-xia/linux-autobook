@@ -46,7 +46,11 @@ def main() -> int:
     config = Config.load()
     if args.baidu_login:
         return baidu_login(config, args.qr_output, args.login_timeout)
-    config.validate()
+    try:
+        config.validate()
+    except RuntimeError as exc:
+        logging.getLogger(__name__).error("配置未就绪，请先在管理面板完成快速设置：%s", exc)
+        return 78
     from autobook_linux.worker import Worker
 
     worker = Worker(config)

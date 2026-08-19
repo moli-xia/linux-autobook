@@ -103,6 +103,14 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
     ConfigField("DRIVE_REQUIRE_UPLOAD_DATE_VERIFY", "worker", "结果网盘", "校验上传日期", "1", options=("1", "0")),
 )
 
+BLANK_IS_MEANINGFUL = {
+    "BAIDU_GATEWAY_CA_FILE",  # use the operating-system CA store
+    "BAIDU_GROUP_GID",       # resolve by group name instead
+    "BAIDU_GROUP_NAME",      # an explicit GID is sufficient
+    "BAIDU_PROXY",
+    "DRIVE_POLICY_ID",
+}
+
 
 @dataclass
 class AdminSettings:
@@ -115,9 +123,13 @@ class AdminSettings:
     worker_env: Path
     session_seconds: int
     public_host: str
+    role: str = "all"
 
     @classmethod
     def load(cls) -> "AdminSettings":
+        role = os.environ.get("ADMIN_ROLE", "all").strip().lower()
+        if role not in {"all", "gateway", "worker"}:
+            role = "all"
         return cls(
             bind=os.environ.get("ADMIN_BIND", "0.0.0.0"),
             port=int(os.environ.get("ADMIN_PORT", "8766")),
@@ -128,7 +140,11 @@ class AdminSettings:
             worker_env=Path(os.environ.get("ADMIN_WORKER_ENV", "/etc/linux-autobook/worker.env")),
             session_seconds=max(300, int(os.environ.get("ADMIN_SESSION_SECONDS", "28800"))),
             public_host=os.environ.get("ADMIN_PUBLIC_HOST", "").strip(),
+            role=role,
         )
+
+    def has_role(self, role: str) -> bool:
+        return self.role == "all" or self.role == role
 
 
 def read_env_file(path: Path) -> dict[str, str]:
@@ -183,7 +199,11 @@ def write_env_file(path: Path, values: dict[str, str], target: str) -> None:
 def apply_config_defaults(values: dict[str, str], target: str) -> None:
     """Fill non-empty application defaults without inventing blank env vars."""
     for field in CONFIG_FIELDS:
-        if field.target in {target, "both"} and field.default and not values.get(field.key):
+        if (
+            field.target in {target, "both"}
+            and field.default
+            and (field.key not in values or (not values[field.key] and field.key not in BLANK_IS_MEANINGFUL))
+        ):
             values[field.key] = field.default
 
 
@@ -360,9 +380,60 @@ class QrLoginManager:
 
 def service_status(service: str) -> dict[str, str]:
     unit = MANAGED_SERVICES[service]
+    load = subprocess.run(
+        ["systemctl", "show", unit, "--property=LoadState", "--value"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    ).stdout.strip()
+    if load in {"not-found", ""}:
+        return {"active": "not-installed", "enabled": "not-installed", "load": load or "not-found"}
     active = subprocess.run(["systemctl", "is-active", unit], capture_output=True, text=True, timeout=10).stdout.strip()
     enabled = subprocess.run(["systemctl", "is-enabled", unit], capture_output=True, text=True, timeout=10).stdout.strip()
-    return {"active": active or "unknown", "enabled": enabled or "unknown"}
+    return {"active": active or "unknown", "enabled": enabled or "unknown", "load": load}
+
+
+def configuration_issues(role: str, gateway: dict[str, str], worker: dict[str, str]) -> list[str]:
+    """Return actionable static configuration errors without making network calls."""
+    issues: list[str] = []
+    if role == "gateway":
+        if not gateway.get("BAIDU_GATEWAY_TOKEN"):
+            issues.append("未设置网关共享令牌")
+        cert = Path(gateway.get("GATEWAY_TLS_CERT", ""))
+        key = Path(gateway.get("GATEWAY_TLS_KEY", ""))
+        if not cert.is_file():
+            issues.append("网关 TLS 证书不存在")
+        if not key.is_file():
+            issues.append("网关 TLS 私钥不存在")
+        bduss, stoken = gateway.get("BAIDU_BDUSS", ""), gateway.get("BAIDU_STOKEN", "")
+        auth_file = Path(gateway.get("BAIDU_AUTH_FILE", str(PROJECT_ROOT / "runtime" / "baidu_credentials.json")))
+        if bool(bduss) != bool(stoken):
+            issues.append("BDUSS 与 STOKEN 必须同时填写")
+        elif not bduss and not auth_file.is_file():
+            issues.append("尚未完成百度网盘扫码登录")
+        if not gateway.get("BAIDU_GROUP_GID") and not gateway.get("BAIDU_GROUP_NAME"):
+            issues.append("未设置百度群 GID 或群名称")
+    elif role == "worker":
+        if not worker.get("WORKER_TOKEN"):
+            issues.append("未设置任务网站 Worker Token")
+        site = worker.get("SITE_BASE_URL", "")
+        if not site.startswith(("http://", "https://")):
+            issues.append("任务网站地址格式无效")
+        gateway_url = worker.get("BAIDU_GATEWAY_URL", "")
+        if not gateway_url.startswith("https://"):
+            issues.append("未设置有效的 HTTPS 下载网关地址")
+        if not worker.get("BAIDU_GATEWAY_TOKEN"):
+            issues.append("未设置下载网关共享令牌")
+        ca_file = worker.get("BAIDU_GATEWAY_CA_FILE", "")
+        if ca_file and not Path(ca_file).is_file():
+            issues.append("指定的网关 CA/证书文件不存在；公有证书应留空")
+        if not worker.get("DRIVE_EMAIL"):
+            issues.append("未设置结果网盘账号")
+        if not worker.get("DRIVE_PASSWORD"):
+            issues.append("未设置结果网盘密码")
+        if not worker.get("DRIVE_BASE_URL", "").startswith("https://"):
+            issues.append("结果网盘地址必须使用 HTTPS")
+    return issues
 
 
 def service_logs(service: str, lines: int = 80) -> str:
@@ -378,7 +449,7 @@ def service_logs(service: str, lines: int = 80) -> str:
 
 
 STYLE = """
-:root{color-scheme:dark;--bg:#0b1020;--card:#151c31;--line:#2a3554;--text:#eef3ff;--muted:#9ba8c7;--accent:#6ea8fe;--ok:#4ade80;--bad:#fb7185;--warn:#fbbf24}*{box-sizing:border-box}body{margin:0;background:linear-gradient(140deg,#090d18,#111b35);color:var(--text);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}main{max-width:1180px;margin:auto;padding:24px}.top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:22px}.brand h1{font-size:24px;margin:0}.brand p{margin:3px 0;color:var(--muted)}.card{background:rgba(21,28,49,.95);border:1px solid var(--line);border-radius:14px;padding:20px;margin:16px 0;box-shadow:0 14px 40px #0004}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:14px}.field label{display:block;font-weight:650;margin-bottom:6px}.field small{display:block;color:var(--muted);min-height:20px}.field input,.field select,.field textarea{width:100%;background:#0c1325;color:var(--text);border:1px solid #35415f;border-radius:8px;padding:10px 11px}.field textarea{min-height:130px}button,.button{display:inline-block;border:0;border-radius:8px;padding:10px 15px;background:var(--accent);color:#07101f;font-weight:750;text-decoration:none;cursor:pointer}button.secondary,.button.secondary{background:#273451;color:var(--text)}button.danger{background:var(--bad)}.actions{display:flex;flex-wrap:wrap;gap:8px}.status{display:inline-flex;align-items:center;gap:7px;padding:5px 9px;border-radius:99px;background:#0c1325}.dot{width:9px;height:9px;border-radius:50%;background:var(--bad)}.active .dot{background:var(--ok)}.notice{padding:12px 14px;border-radius:9px;background:#33270a;border:1px solid #725b18;color:#ffe8a3}.success{background:#0e3020;border-color:#23633f;color:#b9f6cf}.error{background:#3a121a;border-color:#7b2939;color:#ffd0d8}.tabs{display:flex;gap:8px;flex-wrap:wrap}.section h2{margin-top:0}.secret-note{color:var(--warn)}pre{white-space:pre-wrap;word-break:break-word;background:#070b14;border-radius:8px;padding:14px;max-height:430px;overflow:auto}.login{max-width:430px;margin:9vh auto}.qr{max-width:320px;background:white;padding:12px;border-radius:10px}@media(max-width:600px){main{padding:14px}.top{align-items:flex-start;flex-direction:column}.card{padding:15px}}
+:root{color-scheme:light;--bg:#f4f7fb;--card:#fff;--line:#dfe6f0;--text:#172033;--muted:#64748b;--accent:#2563eb;--accent2:#eff6ff;--ok:#15803d;--okbg:#f0fdf4;--bad:#dc2626;--badbg:#fef2f2;--warn:#a16207;--warnbg:#fffbeb}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}main{max-width:1120px;margin:auto;padding:24px}.top{display:flex;align-items:center;justify-content:space-between;gap:18px}.brand h1{font-size:24px;margin:0}.brand p,.muted{margin:3px 0;color:var(--muted)}nav{display:flex;gap:6px;flex-wrap:wrap;margin:18px 0 24px;border-bottom:1px solid var(--line);padding-bottom:10px}nav a{padding:8px 12px;border-radius:8px;color:#334155;text-decoration:none;font-weight:650}nav a:hover,nav a.current{background:var(--accent2);color:var(--accent)}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;margin:16px 0;box-shadow:0 4px 16px #0f172a0a}.card h2{margin:0 0 6px;font-size:19px}.card h3{margin:0 0 8px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:14px}.field{margin:6px 0}.field label{display:flex;align-items:center;gap:8px;font-weight:680;margin-bottom:6px}.field small{display:block;color:var(--muted);min-height:20px;margin-top:4px}.field input,.field select,.field textarea{width:100%;background:#fff;color:var(--text);border:1px solid #cbd5e1;border-radius:9px;padding:10px 11px;font:inherit}.field input:focus,.field select:focus,.field textarea:focus{outline:2px solid #bfdbfe;border-color:var(--accent)}.field textarea{min-height:130px}button,.button{display:inline-block;border:0;border-radius:9px;padding:10px 15px;background:var(--accent);color:#fff;font-weight:720;text-decoration:none;cursor:pointer;font:inherit}button.secondary,.button.secondary{background:#e2e8f0;color:#243047}button.danger{background:var(--bad)}.actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:14px}.status,.pill{display:inline-flex;align-items:center;gap:7px;padding:4px 9px;border-radius:99px;background:#f1f5f9;color:#475569;font-size:13px}.pill.ok,.status.active{color:var(--ok);background:var(--okbg)}.pill.bad{color:var(--bad);background:var(--badbg)}.dot{width:8px;height:8px;border-radius:50%;background:var(--bad)}.active .dot{background:var(--ok)}.notice{padding:12px 14px;border-radius:9px;background:var(--warnbg);border:1px solid #fde68a;color:var(--warn);margin:12px 0}.success{background:var(--okbg);border-color:#bbf7d0;color:var(--ok)}.error{background:var(--badbg);border-color:#fecaca;color:#991b1b}.steps{counter-reset:step}.step{position:relative;padding-left:44px;min-height:36px;margin:16px 0}.step:before{counter-increment:step;content:counter(step);position:absolute;left:0;top:0;width:30px;height:30px;display:grid;place-items:center;border-radius:50%;background:var(--accent2);color:var(--accent);font-weight:800}details{border-top:1px solid var(--line);padding:14px 0}details:first-of-type{border-top:0}summary{cursor:pointer;font-weight:750;font-size:16px}.issue-list{margin:10px 0 0;padding-left:20px;color:#991b1b}pre{white-space:pre-wrap;word-break:break-word;background:#0f172a;color:#e2e8f0;border-radius:9px;padding:14px;max-height:430px;overflow:auto}.login{max-width:430px;margin:9vh auto}.qr{max-width:320px;background:white;padding:12px;border:1px solid var(--line);border-radius:10px}.hero{display:flex;justify-content:space-between;align-items:center;gap:20px}.hero h2{font-size:22px}.kpi{font-size:28px;font-weight:800}.inline-form{display:inline}.secret-note{color:var(--warn)}@media(max-width:650px){main{padding:14px}.top,.hero{align-items:flex-start;flex-direction:column}.card{padding:15px}nav{overflow-x:auto;flex-wrap:nowrap}nav a{white-space:nowrap}}
 """
 
 
@@ -475,14 +546,22 @@ def make_handler(settings: AdminSettings) -> type[BaseHTTPRequestHandler]:
             if not session:
                 return
             if path == "/":
-                self._dashboard(session)
+                self._overview(session)
+            elif path == "/setup":
+                self._setup(session)
+            elif path == "/advanced":
+                self._advanced(session)
+            elif path == "/tools":
+                self._tools(session)
+            elif path == "/account":
+                self._account(session)
             elif path.startswith("/logs/"):
                 name = path.rsplit("/", 1)[-1]
                 if name not in MANAGED_SERVICES:
                     self._send(404, b"not found", "text/plain")
                     return
                 logs = html.escape(service_logs(name))
-                content = self._top(session) + f"<div class='card'><h2>{html.escape(name)} 日志</h2><pre>{logs}</pre><a class='button secondary' href='/'>返回</a></div>"
+                content = self._top(session, "") + f"<div class='card'><h2>{html.escape(name)} 日志</h2><p class='muted'>最近 80 行 systemd 日志，下载链接会自动隐藏。</p><pre>{logs}</pre><a class='button secondary' href='/'>返回概况</a></div>"
                 self._send(200, page("服务日志", content))
             else:
                 self._send(404, b"not found", "text/plain")
@@ -506,15 +585,26 @@ def make_handler(settings: AdminSettings) -> type[BaseHTTPRequestHandler]:
             try:
                 if path == "/save":
                     self._save_config(form)
-                    self._redirect("/?saved=1")
+                    start_role = form.get("start_role", "")
+                    if start_role:
+                        self._start_configured_role(start_role)
+                    next_path = form.get("next", "/setup")
+                    if next_path not in {"/", "/setup", "/advanced", "/tools"}:
+                        next_path = "/setup"
+                    suffix = "?saved=1&started=1" if start_role else "?saved=1"
+                    self._redirect(next_path + suffix)
                 elif path == "/service":
                     self._service_action(form)
                     self._redirect("/?service=1")
+                elif path == "/check":
+                    self._check_role(session, form)
                 elif path == "/password":
                     self._change_password(form)
                     sessions.clear()
                     self._redirect("/login", f"{SESSION_COOKIE}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict")
                 elif path == "/baidu-login":
+                    if not settings.has_role("gateway"):
+                        raise ValueError("当前节点未安装百度下载网关")
                     qr_login.start()
                     self._redirect("/?qr=1")
                 elif path == "/password-dict":
@@ -527,7 +617,7 @@ def make_handler(settings: AdminSettings) -> type[BaseHTTPRequestHandler]:
                     self._send(404, b"not found", "text/plain")
             except Exception as exc:
                 LOGGER.exception("管理操作失败 path=%s", path)
-                self._send(400, page("操作失败", self._top(session) + f"<div class='card error'><h2>操作失败</h2><p>{html.escape(str(exc))}</p><a class='button secondary' href='/'>返回</a></div>"))
+                self._send(400, page("操作失败", self._top(session, "") + f"<div class='card error'><h2>操作失败</h2><p>{html.escape(str(exc))}</p><a class='button secondary' href='/'>返回</a></div>"))
 
         def _login(self) -> None:
             address = self.client_address[0]
@@ -549,61 +639,138 @@ def make_handler(settings: AdminSettings) -> type[BaseHTTPRequestHandler]:
             cookie = f"{SESSION_COOKIE}={token}; Path=/; Max-Age={settings.session_seconds}; Secure; HttpOnly; SameSite=Strict"
             self._redirect("/", cookie)
 
-        def _top(self, session: dict[str, Any]) -> str:
-            return f"<div class='top'><div class='brand'><h1>linux-autobook 管理面板</h1><p>当前用户：{html.escape(str(session['username']))}</p></div><form method='post' action='/logout'><input type='hidden' name='csrf' value='{html.escape(str(session['csrf']))}'><button class='secondary' type='submit'>退出登录</button></form></div>"
+        def _roles(self) -> list[str]:
+            return [role for role in ("gateway", "worker") if settings.has_role(role)]
 
-        def _dashboard(self, session: dict[str, Any]) -> None:
+        def _top(self, session: dict[str, Any], current: str) -> str:
+            links = (("/", "概况"), ("/setup", "快速设置"), ("/advanced", "高级设置"), ("/tools", "工具与诊断"), ("/account", "管理账号"))
+            nav = "".join(f"<a class='{'current' if path == current else ''}' href='{path}'>{label}</a>" for path, label in links)
+            role_label = {"all": "网关 + Worker", "gateway": "仅网关", "worker": "仅 Worker"}[settings.role]
+            return f"<div class='top'><div class='brand'><h1>linux-autobook</h1><p>{role_label} · 当前用户 {html.escape(str(session['username']))}</p></div><form method='post' action='/logout'><input type='hidden' name='csrf' value='{html.escape(str(session['csrf']))}'><button class='secondary' type='submit'>退出</button></form></div><nav>{nav}</nav>"
+
+        def _notices(self) -> str:
             query = parse_qs(urlparse(self.path).query)
-            notices = []
+            notices: list[str] = []
             if passwords.must_change():
-                notices.append("<div class='notice'>当前仍在使用默认密码 admin。请先在页面底部修改管理账号密码。</div>")
+                notices.append("<div class='notice'>当前仍使用默认密码 admin。完成基础配置后，请到“管理账号”立即修改。</div>")
             if query.get("saved"):
-                notices.append("<div class='notice success'>配置已原子保存。请重启相关服务使其生效。</div>")
-            statuses = {name: service_status(name) for name in MANAGED_SERVICES}
-            service_cards = []
-            for name, state in statuses.items():
-                active_class = "active" if state["active"] == "active" else ""
-                buttons = "".join(
-                    f"<button class='{('danger' if action == 'stop' else 'secondary')}' name='action' value='{action}'>{label}</button>"
-                    for action, label in (("start", "启动"), ("restart", "重启"), ("stop", "停止"))
-                )
-                service_cards.append(f"<div class='card'><h2>{html.escape(name)}</h2><p class='status {active_class}'><span class='dot'></span>{html.escape(state['active'])} / {html.escape(state['enabled'])}</p><form class='actions' method='post' action='/service'><input type='hidden' name='csrf' value='{html.escape(str(session['csrf']))}'><input type='hidden' name='service' value='{name}'>{buttons}<a class='button secondary' href='/logs/{name}'>日志</a></form></div>")
+                text = "配置已保存。" + (" 服务也已启动。" if query.get("started") else "")
+                notices.append(f"<div class='notice success'>{text}</div>")
+            if query.get("service"):
+                notices.append("<div class='notice success'>服务操作已完成。</div>")
+            if query.get("qr"):
+                notices.append("<div class='notice success'>二维码任务已启动，请在“工具与诊断”页面扫码。</div>")
+            return "".join(notices)
 
-            gateway_values = read_env_file(settings.gateway_env)
-            worker_values = read_env_file(settings.worker_env)
+        def _values(self) -> tuple[dict[str, str], dict[str, str]]:
+            return read_env_file(settings.gateway_env), read_env_file(settings.worker_env)
+
+        def _field(self, key: str, gateway: dict[str, str], worker: dict[str, str]) -> str:
+            field = next(item for item in CONFIG_FIELDS if item.key == key)
+            source = gateway if field.target == "gateway" else worker
+            if field.target == "both":
+                source = gateway if gateway.get(field.key) else worker
+            current = source.get(field.key, field.default)
+            configured = bool(current)
+            badge = ""
+            if field.secret:
+                badge = f"<span class='pill {'ok' if configured else 'bad'}'>{'已配置' if configured else '必填'}</span>"
+            help_text = field.help_text or ("已保存的敏感值不会回显；不修改请留空。" if field.secret else "")
+            if key == "BAIDU_GATEWAY_CA_FILE":
+                help_text = "自签名网关填写证书路径；Let’s Encrypt 等公有证书请留空。"
+            if field.options:
+                options = "".join(f"<option value='{html.escape(option)}'{' selected' if option == current else ''}>{html.escape(option)}</option>" for option in field.options)
+                control = f"<select name='{field.key}'>{options}</select>"
+            else:
+                value = "" if field.secret else current
+                input_type = "password" if field.secret else "text"
+                placeholder = "已保存；留空保持" if field.secret and current else ("尚未配置" if field.secret else "")
+                control = f"<input type='{input_type}' name='{field.key}' value='{html.escape(value, quote=True)}' placeholder='{html.escape(placeholder, quote=True)}' autocomplete='off'>"
+            return f"<div class='field'><label>{html.escape(field.label)} {badge}</label>{control}<small>{html.escape(help_text)}</small></div>"
+
+        def _role_issues(self, role: str) -> list[str]:
+            gateway, worker = self._values()
+            return configuration_issues(role, gateway, worker)
+
+        def _service_card(self, session: dict[str, Any], role: str, issues: list[str]) -> str:
+            state = service_status(role)
+            active = state["active"] == "active"
+            status_text = "运行中" if active else ("未安装" if state["active"] == "not-installed" else "已停止")
+            issue_html = "" if not issues else "<ul class='issue-list'>" + "".join(f"<li>{html.escape(issue)}</li>" for issue in issues) + "</ul>"
+            actions = ""
+            if state["active"] != "not-installed":
+                buttons = "".join(f"<button class='{('danger' if action == 'stop' else 'secondary')}' name='action' value='{action}'>{label}</button>" for action, label in (("start", "启动"), ("restart", "重启"), ("stop", "停止")))
+                actions = f"<form class='actions' method='post' action='/service'><input type='hidden' name='csrf' value='{html.escape(str(session['csrf']))}'><input type='hidden' name='service' value='{role}'>{buttons}<a class='button secondary' href='/logs/{role}'>查看日志</a></form>"
+            label = "百度下载网关" if role == "gateway" else "任务 Worker"
+            ready = not issues
+            return f"<div class='card'><div class='hero'><div><h2>{label}</h2><p class='status {'active' if active else ''}'><span class='dot'></span>{status_text}</p></div><span class='pill {'ok' if ready else 'bad'}'>{'配置完整' if ready else f'缺少 {len(issues)} 项'}</span></div>{issue_html}{actions}</div>"
+
+        def _overview(self, session: dict[str, Any]) -> None:
+            role_issues = {role: self._role_issues(role) for role in self._roles()}
+            ready_count = sum(not issues for issues in role_issues.values())
+            content = self._top(session, "/") + self._notices()
+            content += f"<div class='card hero'><div><h2>系统概况</h2><p class='muted'>先完成快速设置，再做连通性检测，最后启动服务。</p></div><div><div class='kpi'>{ready_count}/{len(role_issues)}</div><div class='muted'>角色配置就绪</div></div></div>"
+            content += "<div class='grid'>" + "".join(self._service_card(session, role, issues) for role, issues in role_issues.items()) + "</div>"
+            content += "<div class='card steps'><h2>首次使用只需三步</h2><div class='step'><strong>填写必需信息</strong><div class='muted'>在快速设置中填写带“必填”标记的内容。</div></div><div class='step'><strong>扫码并检测</strong><div class='muted'>网关节点完成百度扫码；然后运行预检定位网络或凭据问题。</div></div><div class='step'><strong>启动服务</strong><div class='muted'>配置不完整时面板会阻止启动，避免 systemd 重启风暴。</div></div><div class='actions'><a class='button' href='/setup'>开始快速设置</a><a class='button secondary' href='/tools'>打开诊断工具</a></div></div>"
+            self._send(200, page("系统概况", content))
+
+        def _setup(self, session: dict[str, Any]) -> None:
+            gateway, worker = self._values()
+            content = self._top(session, "/setup") + self._notices()
+            content += "<div class='card'><h2>快速设置</h2><p class='muted'>这里只保留启动所需项目。其余参数保持推荐默认值，可稍后在高级设置修改。</p></div>"
+            if settings.has_role("gateway"):
+                keys = ("BAIDU_GATEWAY_TOKEN", "BAIDU_GROUP_GID", "BAIDU_GROUP_NAME", "BAIDU_PROXY")
+                fields = "".join(self._field(key, gateway, worker) for key in keys)
+                issues = self._role_issues("gateway")
+                issue_html = "" if not issues else "<div class='notice'>还需完成：" + "；".join(html.escape(x) for x in issues) + "</div>"
+                content += f"<form method='post' action='/save'><input type='hidden' name='csrf' value='{html.escape(str(session['csrf']))}'><input type='hidden' name='next' value='/setup'><div class='card'><h2>百度下载网关</h2><p class='muted'>共享令牌必须与所有 Worker 一致。百度登录请在保存后前往工具页扫码。</p>{issue_html}<div class='grid'>{fields}</div><div class='actions'><button type='submit'>保存网关设置</button><a class='button secondary' href='/tools'>去扫码/检测</a></div></div></form>"
+            if settings.has_role("worker"):
+                keys = ("SITE_BASE_URL", "WORKER_TOKEN", "WORKER_ID", "CONCURRENCY", "BAIDU_GATEWAY_URL", "BAIDU_GATEWAY_TOKEN", "BAIDU_GATEWAY_CA_FILE", "DRIVE_EMAIL", "DRIVE_PASSWORD", "DRIVE_BASE_URL", "DRIVE_TARGET_DIR")
+                fields = "".join(self._field(key, gateway, worker) for key in keys)
+                issues = self._role_issues("worker")
+                issue_html = "" if not issues else "<div class='notice'>还需完成：" + "；".join(html.escape(x) for x in issues) + "</div>"
+                content += f"<form method='post' action='/save'><input type='hidden' name='csrf' value='{html.escape(str(session['csrf']))}'><input type='hidden' name='next' value='/setup'><div class='card'><h2>任务 Worker</h2><p class='muted'>填写任务网站、中心下载网关和结果网盘三组信息即可运行。</p>{issue_html}<div class='grid'>{fields}</div><div class='actions'><button type='submit'>仅保存</button><button class='secondary' type='submit' name='start_role' value='worker'>保存并启动 Worker</button></div></div></form>"
+            self._send(200, page("快速设置", content))
+
+        def _advanced(self, session: dict[str, Any]) -> None:
+            gateway, worker = self._values()
             sections: dict[str, list[str]] = {}
             for field in CONFIG_FIELDS:
-                source = gateway_values if field.target == "gateway" else worker_values
-                if field.target == "both":
-                    source = gateway_values if gateway_values.get(field.key) else worker_values
-                current = source.get(field.key, field.default)
-                help_text = field.help_text or ("敏感值留空表示保持不变。" if field.secret else "")
-                if field.options:
-                    options = "".join(f"<option value='{html.escape(option)}'{' selected' if option == current else ''}>{html.escape(option)}</option>" for option in field.options)
-                    control = f"<select name='{field.key}'>{options}</select>"
-                else:
-                    value = "" if field.secret else current
-                    input_type = "password" if field.secret else "text"
-                    placeholder = "已设置；留空保持" if field.secret and current else ("未设置" if field.secret else "")
-                    control = f"<input type='{input_type}' name='{field.key}' value='{html.escape(value, quote=True)}' placeholder='{html.escape(placeholder, quote=True)}' autocomplete='off'>"
-                sections.setdefault(field.section, []).append(f"<div class='field'><label>{html.escape(field.label)}</label>{control}<small>{html.escape(help_text)}</small></div>")
-            config_html = "".join(f"<div class='card section'><h2>{html.escape(section)}</h2><div class='grid'>{''.join(fields)}</div></div>" for section, fields in sections.items())
+                if field.target == "gateway" and not settings.has_role("gateway"):
+                    continue
+                if field.target == "worker" and not settings.has_role("worker"):
+                    continue
+                sections.setdefault(field.section, []).append(self._field(field.key, gateway, worker))
+            groups = "".join(f"<details><summary>{html.escape(section)}</summary><div class='grid'>{''.join(fields)}</div></details>" for section, fields in sections.items())
+            content = self._top(session, "/advanced") + self._notices()
+            content += f"<form method='post' action='/save'><input type='hidden' name='csrf' value='{html.escape(str(session['csrf']))}'><input type='hidden' name='next' value='/advanced'><div class='card'><h2>高级设置</h2><p class='muted'>一般无需修改。各分组默认折叠，敏感值不会回显。</p>{groups}<div class='actions'><button type='submit'>保存高级设置</button></div></div></form>"
+            self._send(200, page("高级设置", content))
 
-            qr_status, has_qr, qr_log = qr_login.snapshot()
-            qr_image = "<p><img class='qr' src='/qr.png' alt='百度登录二维码'></p>" if has_qr else ""
-            password_path = Path(worker_values.get("PASSWORD_DICT", str(PROJECT_ROOT / "password.txt")))
-            try:
-                password_count = sum(1 for line in password_path.read_text(encoding="utf-8", errors="ignore").splitlines() if line.strip())
-            except FileNotFoundError:
-                password_count = 0
+        def _tools(self, session: dict[str, Any]) -> None:
+            gateway, worker = self._values()
+            content = self._top(session, "/tools") + self._notices()
+            checks = []
+            for role in self._roles():
+                label = "网关" if role == "gateway" else "Worker"
+                checks.append(f"<div class='card'><h2>{label} 连通性检测</h2><p class='muted'>检查本地配置、TLS、远端接口和运行依赖，不启动常驻服务。</p><form method='post' action='/check'><input type='hidden' name='csrf' value='{html.escape(str(session['csrf']))}'><button name='role' value='{role}'>运行 {label} 预检</button></form></div>")
+            content += "<div class='grid'>" + "".join(checks) + "</div>"
+            if settings.has_role("gateway"):
+                qr_status, has_qr, qr_log = qr_login.snapshot()
+                qr_image = "<p><img class='qr' src='/qr.png' alt='百度登录二维码'></p>" if has_qr else ""
+                content += f"<div class='card'><h2>百度网盘扫码登录</h2><p>{html.escape(qr_status)}</p>{qr_image}<form method='post' action='/baidu-login'><input type='hidden' name='csrf' value='{html.escape(str(session['csrf']))}'><button type='submit'>生成新二维码</button></form>{f'<pre>{html.escape(qr_log)}</pre>' if qr_log else ''}</div>"
+            if settings.has_role("worker"):
+                password_path = Path(worker.get("PASSWORD_DICT", str(PROJECT_ROOT / "password.txt")))
+                try:
+                    password_count = sum(1 for line in password_path.read_text(encoding="utf-8", errors="ignore").splitlines() if line.strip())
+                except (FileNotFoundError, PermissionError):
+                    password_count = 0
+                content += f"<div class='card'><h2>解压密码字典</h2><p class='muted'>当前 {password_count} 个候选密码。留空提交不会覆盖。</p><form method='post' action='/password-dict'><input type='hidden' name='csrf' value='{html.escape(str(session['csrf']))}'><div class='field'><textarea name='passwords' placeholder='每行一个密码'></textarea></div><button type='submit'>替换密码字典</button></form></div>"
+            self._send(200, page("工具与诊断", content))
 
-            content = self._top(session) + "".join(notices)
-            content += "<div class='grid'>" + "".join(service_cards) + "</div>"
-            content += f"<form method='post' action='/save'><input type='hidden' name='csrf' value='{html.escape(str(session['csrf']))}'>{config_html}<div class='card'><button type='submit'>保存全部配置</button></div></form>"
-            content += f"<div class='card'><h2>百度扫码登录</h2><p>{html.escape(qr_status)}</p>{qr_image}<form method='post' action='/baidu-login'><input type='hidden' name='csrf' value='{html.escape(str(session['csrf']))}'><button type='submit'>生成新二维码</button></form><pre>{html.escape(qr_log)}</pre></div>"
-            content += f"<div class='card'><h2>解压密码字典</h2><p>当前共 {password_count} 个非空候选。留空提交不会覆盖。</p><form method='post' action='/password-dict'><input type='hidden' name='csrf' value='{html.escape(str(session['csrf']))}'><div class='field'><textarea name='passwords' placeholder='每行一个密码；留空保持现有字典'></textarea></div><p><button type='submit'>替换密码字典</button></p></form></div>"
-            content += f"<div class='card'><h2>修改管理账号</h2><form method='post' action='/password'><input type='hidden' name='csrf' value='{html.escape(str(session['csrf']))}'><div class='grid'><div class='field'><label>新用户名</label><input name='username' value='{html.escape(passwords.username(), quote=True)}' required></div><div class='field'><label>当前密码</label><input type='password' name='current_password' required></div><div class='field'><label>新密码（至少 10 位）</label><input type='password' name='new_password' required></div></div><p><button type='submit'>修改并退出登录</button></p></form></div>"
-            self._send(200, page("linux-autobook 管理面板", content))
+        def _account(self, session: dict[str, Any]) -> None:
+            content = self._top(session, "/account") + self._notices()
+            content += f"<div class='card'><h2>修改管理账号</h2><p class='muted'>修改后所有已登录会话都会退出。</p><form method='post' action='/password'><input type='hidden' name='csrf' value='{html.escape(str(session['csrf']))}'><div class='grid'><div class='field'><label>新用户名</label><input name='username' value='{html.escape(passwords.username(), quote=True)}' required></div><div class='field'><label>当前密码</label><input type='password' name='current_password' required></div><div class='field'><label>新密码（至少 10 位）</label><input type='password' name='new_password' required></div></div><div class='actions'><button type='submit'>修改并重新登录</button></div></form></div>"
+            self._send(200, page("管理账号", content))
 
         def _save_config(self, form: dict[str, str]) -> None:
             gateway = read_env_file(settings.gateway_env)
@@ -616,19 +783,76 @@ def make_handler(settings: AdminSettings) -> type[BaseHTTPRequestHandler]:
                     continue
                 if "\n" in value or "\r" in value or "\x00" in value:
                     raise ValueError(f"{field.label} 含非法换行或空字符")
-                if field.target in {"gateway", "both"}:
+                if field.target in {"gateway", "both"} and settings.has_role("gateway"):
                     gateway[field.key] = value
-                if field.target in {"worker", "both"}:
+                if field.target in {"worker", "both"} and settings.has_role("worker"):
                     worker[field.key] = value
-            apply_config_defaults(gateway, "gateway")
-            apply_config_defaults(worker, "worker")
-            write_env_file(settings.gateway_env, gateway, "gateway")
-            write_env_file(settings.worker_env, worker, "worker")
+            if settings.has_role("gateway"):
+                apply_config_defaults(gateway, "gateway")
+                write_env_file(settings.gateway_env, gateway, "gateway")
+            if settings.has_role("worker"):
+                apply_config_defaults(worker, "worker")
+                write_env_file(settings.worker_env, worker, "worker")
+
+        def _start_configured_role(self, role: str) -> None:
+            if role not in self._roles():
+                raise ValueError("当前节点未安装该角色")
+            issues = self._role_issues(role)
+            if issues:
+                raise ValueError("配置尚未完成：" + "；".join(issues))
+            if role == "worker" and settings.role == "all" and service_status("gateway")["active"] != "active":
+                raise ValueError("请先在“工具与诊断”完成百度扫码并启动本机下载网关")
+            unit = MANAGED_SERVICES[role]
+            subprocess.run(["systemctl", "reset-failed", unit], capture_output=True, timeout=20)
+            result = subprocess.run(["systemctl", "enable", "--now", unit], capture_output=True, text=True, timeout=90)
+            if result.returncode != 0:
+                raise RuntimeError((result.stderr or result.stdout or "systemctl 启动失败")[-1500:])
+
+        def _run_preflight(self, role: str) -> str:
+            if role not in self._roles():
+                raise ValueError("当前节点未安装该角色")
+            issues = self._role_issues(role)
+            if issues:
+                return "静态配置检查未通过：\n- " + "\n- ".join(issues)
+            values = read_env_file(settings.gateway_env if role == "gateway" else settings.worker_env)
+            environment = dict(os.environ)
+            environment.update(values)
+            script = PROJECT_ROOT / ("run_gateway.py" if role == "gateway" else "run_worker.py")
+            command = [str(PROJECT_ROOT / ".venv" / "bin" / "python"), str(script), "--check"]
+            runuser = shutil.which("runuser")
+            if os.name != "nt" and os.geteuid() == 0 and runuser:
+                command = [runuser, "--user", "autobook", "--preserve-environment", "--", *command]
+            result = subprocess.run(command, cwd=PROJECT_ROOT, env=environment, capture_output=True, text=True, errors="replace", timeout=180)
+            output = (result.stdout + "\n" + result.stderr).strip()
+            for field in CONFIG_FIELDS:
+                if field.secret:
+                    secret = values.get(field.key, "")
+                    if len(secret) >= 4:
+                        output = output.replace(secret, "[敏感值已隐藏]")
+            output = re.sub(r"(?i)(bduss|stoken|password|token)=\S+", r"\1=[敏感值已隐藏]", output)
+            if result.returncode != 0:
+                return f"预检失败（退出码 {result.returncode}）：\n{output or '没有输出'}"
+            return "预检通过。\n" + (output or "所有检查均正常。")
+
+        def _check_role(self, session: dict[str, Any], form: dict[str, str]) -> None:
+            role = form.get("role", "")
+            result = self._run_preflight(role)
+            success = result.startswith("预检通过")
+            label = "网关" if role == "gateway" else "Worker"
+            content = self._top(session, "/tools") + f"<div class='card'><h2>{label} 预检结果</h2><div class='notice {'success' if success else 'error'}'>{'通过' if success else '需要处理'}</div><pre>{html.escape(result)}</pre><div class='actions'><a class='button secondary' href='/tools'>返回诊断工具</a></div></div>"
+            self._send(200, page("预检结果", content))
 
         def _service_action(self, form: dict[str, str]) -> None:
             name, action = form.get("service", ""), form.get("action", "")
-            if name not in MANAGED_SERVICES or action not in {"start", "stop", "restart"}:
+            if name not in self._roles() or action not in {"start", "stop", "restart"}:
                 raise ValueError("不允许的服务操作")
+            if action == "start":
+                self._start_configured_role(name)
+                return
+            if action == "restart":
+                issues = self._role_issues(name)
+                if issues:
+                    raise ValueError("配置尚未完成：" + "；".join(issues))
             result = subprocess.run(["systemctl", action, MANAGED_SERVICES[name]], capture_output=True, text=True, timeout=90)
             if result.returncode != 0:
                 raise RuntimeError((result.stderr or result.stdout or "systemctl 失败")[-1000:])
@@ -659,6 +883,8 @@ def make_handler(settings: AdminSettings) -> type[BaseHTTPRequestHandler]:
                     output.write("\n".join(values) + "\n")
                 os.replace(tmp, path)
                 os.chmod(path, 0o600)
+                if os.name != "nt":
+                    shutil.chown(path, user="autobook", group="autobook")
             finally:
                 tmp.unlink(missing_ok=True)
 

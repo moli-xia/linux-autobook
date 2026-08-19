@@ -31,7 +31,7 @@
 - 百度 CDN 对整文件和 8 MiB Range 返回 HTTP 403 时，4 MiB 顺序 Range 回退能够完整下载并通过大小校验。
 - 上传后的分享文件重新下载验证：文件大小与网盘元数据一致，PDF 可正常打开，242/242 页内容非空。
 - 三任务并发验证：SS `12607753`、`14686528`、`13128895` 在 1 秒内全部进入处理状态，分别在 15、19、34 秒后完成；两个 PDF 直传任务和一个 UVZ/242 页 PDG 转换任务均成功生成分享文件。
-- 本地和 Linux 服务器测试套件均通过 29 项测试。
+- 本地和 Linux 服务器测试套件均通过 31 项测试。
 - 分布式版本验证：12 个并发 claim 请求争抢 6 条合成任务时，恰好得到 6 个不同任务和 6 个不同租约；合法心跳全部续租，伪造租约、完成后的重复回调均被拒绝。
 - 中心网关真实取件验证：SS `12607753` 经群搜索、百度下载、HTTPS 流式传输及 SHA-256 校验，取得 17,584,393 字节 PDF，随后网关与 Worker 临时文件均被清理。
 
@@ -144,7 +144,14 @@ sudo bash install.sh
 gh repo clone moli-xia/linux-autobook && cd linux-autobook && sudo bash install.sh
 ```
 
-脚本会自动安装系统依赖、创建 Python 虚拟环境和 `autobook` 系统用户，生成管理面板及下载网关的自签名 HTTPS 证书，安装三个 systemd 服务并运行测试。完成后终端会显示管理面板链接，例如：
+不带参数运行时会显示中文菜单，可选择：
+
+- 安装“网关 + Worker”、仅网关或仅 Worker；
+- 更新程序并保留配置、管理密码、百度登录态和 runtime 数据；
+- 查看当前角色、TLS 模式和三个服务状态；
+- 卸载并自动备份配置/runtime，或使用 `--purge` 彻底删除。
+
+脚本会自动安装依赖、创建虚拟环境和 `autobook` 系统用户，只安装所选角色的 systemd unit，并运行测试。完成后终端显示管理面板链接，例如：
 
 ```text
 Admin panel: https://服务器IP:8766/
@@ -152,15 +159,35 @@ Default username: admin
 Default password: admin
 ```
 
-浏览器首次访问自签名证书会显示安全警告，这是预期现象。登录后应立即修改默认密码。网关和 Worker 在必需凭据配置完成前保持停止，避免用空配置反复重启。
+登录后先打开“快速设置”。网关和 Worker 在必需凭据配置完成前保持停止；即使从命令行误启动，配置错误也会使用退出码 78 告诉 systemd 不要反复重启。
 
 可选安装参数：
 
 ```bash
-sudo bash install.sh --admin-port 8766 --public-host 203.0.113.10
+# 单机安装
+sudo bash install.sh --action install --role all --public-host 203.0.113.10 --non-interactive
+
+# 中心网关
+sudo bash install.sh --action install --role gateway --public-host 203.0.113.10 --non-interactive
+
+# 计算节点（公有 CA 证书无需填写 --gateway-ca-file）
+sudo bash install.sh --action install --role worker \
+  --gateway-url https://gateway.example.com:8765 \
+  --gateway-token '与中心网关一致的令牌' --non-interactive
 ```
 
-重复运行脚本会更新程序和 systemd 文件，但保留 `/etc/linux-autobook/*.env`、管理密码、百度凭据、证书和运行数据。
+### 域名和免费 SSL 证书
+
+域名 A/AAAA 记录已经指向服务器且公网可访问 80 端口时，安装菜单输入域名，或执行：
+
+```bash
+sudo bash install.sh --action install --role all \
+  --domain books.example.com --acme-email admin@example.com --non-interactive
+```
+
+脚本使用开源 [Certbot](https://github.com/certbot/certbot) 向 [Let’s Encrypt](https://letsencrypt.org/) 申请证书。Certbot 的 systemd timer 自动续期，`deploy/autobook-cert-deploy.sh` 在续期后以正确权限复制证书并重启面板/网关。HTTP-01 验证必须能从公网访问 80 端口；签发失败时安装不会中断，而是保留自签名证书并给出修复提示。
+
+没有域名时自动生成包含实际 IP/主机名 SAN 的自签名证书，浏览器首次访问会显示安全警告。Worker 连接自签名网关时填写 `BAIDU_GATEWAY_CA_FILE`；连接 Let’s Encrypt 等公有 CA 网关时留空，使用系统信任库。
 
 ### 手工安装
 
@@ -185,14 +212,23 @@ chmod 600 .env password.txt
 
 ## HTTPS 管理面板
 
-安装完成后访问脚本输出的链接。面板覆盖以下操作：
+安装完成后访问脚本输出的链接。界面按使用频率拆成五页：
+
+- **概况**：显示本机角色、配置完整度、服务状态和缺失项；
+- **快速设置**：只显示启动所需的任务网站、下载网关、百度群和结果网盘字段；
+- **高级设置**：默认折叠低频参数，并且不显示本机未安装角色的字段；
+- **工具与诊断**：百度扫码、静态检查、真实连通性预检、日志和解压密码字典；
+- **管理账号**：修改账号密码并使所有旧 Session 失效。
+
+面板还支持：
 
 - 编辑任务网站、原子租约、并发和 Worker 唯一标识；
 - 编辑中心网关地址、TLS 文件、缓存和下载并发；
 - 配置百度群名称/GID、临时目录、代理、Cookie 或发起 App 扫码登录；
 - 配置 aria2、工作目录、解压密码字典和 PDG DPI；
 - 配置 Cloudreve 账号、上传目录、存储策略和分享有效期；
-- 启动、停止或重启网关和 Worker，并查看最近 systemd 日志。
+- 启动、停止或重启网关和 Worker，并查看最近 systemd 日志；
+- 启动前阻止缺少必填项的角色运行，直接显示可操作的错误列表。
 
 安全机制：
 
@@ -202,7 +238,7 @@ chmod 600 .env password.txt
 - 敏感配置字段不会回显，留空保存表示保持原值；
 - 配置文件以 `0600` 权限原子替换；面板只允许控制固定的网关和 Worker 服务。
 
-管理面板为了写入 root-only 配置和控制 systemd，以独立 root 服务运行。建议用防火墙把 `8766/tcp` 限制到可信管理 IP；生产环境可换成受信任 CA 证书。管理账号状态位于 `/etc/linux-autobook/admin-state.json`。
+管理面板为了写入 root-only 配置和控制 systemd，以独立 root 服务运行。建议用防火墙把 `8766/tcp` 限制到可信管理 IP；有域名时优先使用安装脚本集成的 Let’s Encrypt 证书。管理账号状态位于 `/etc/linux-autobook/admin-state.json`。
 
 ### 任务网站
 
@@ -222,7 +258,7 @@ chmod 600 .env password.txt
 | --- | --- | --- |
 | `BAIDU_GATEWAY_URL` | 空 | 中心网关 HTTPS 地址；设置后 Worker 不读取百度 Cookie |
 | `BAIDU_GATEWAY_TOKEN` | 空 | Worker 与网关共享的高强度随机令牌 |
-| `BAIDU_GATEWAY_CA_FILE` | `runtime/gateway.crt` | 网关证书/私有 CA，用于固定校验，禁止关闭证书验证 |
+| `BAIDU_GATEWAY_CA_FILE` | 单机自签名时为 `runtime/gateway.crt` | 自签名/私有 CA 的证书路径；公有 CA 证书留空并使用系统信任库 |
 | `BAIDU_GATEWAY_TIMEOUT_SECONDS` | `7200` | 单次检索下载总等待时间 |
 | `BAIDU_GATEWAY_POLL_SECONDS` | `3` | 网关任务状态轮询间隔 |
 
@@ -324,18 +360,14 @@ cd /opt/autobook-linux
 
 ## 分布式部署与 systemd 常驻
 
-仓库提供网关和 Worker 两个服务，默认以权限受限的 `autobook` 用户运行。先在一台可信服务器部署网关：
+仓库提供网关和 Worker 两个服务，默认以权限受限的 `autobook` 用户运行。中心节点选择“仅百度下载网关”：
 
 ```bash
-sudo useradd --system --home /opt/autobook-linux --shell /usr/sbin/nologin autobook
-sudo install -d -o autobook -g autobook /opt/autobook-linux/runtime /etc/linux-autobook
-sudo cp deploy/autobook-gateway.service /etc/systemd/system/
-sudo install -m 600 deploy/examples/gateway.env /etc/linux-autobook/gateway.env
-sudo systemctl daemon-reload
-sudo systemctl enable --now autobook-gateway.service
+sudo bash install.sh
+# 选择：安装或重新配置 -> 仅百度下载网关
 ```
 
-网关 TLS 证书必须包含实际域名或 IP 的 SAN。自签名部署可生成证书后，把公钥证书安全复制给每台 Worker；私钥只留在网关：
+在网关面板完成百度扫码和预检后启动网关。网关 TLS 证书必须包含实际域名或 IP 的 SAN；推荐在安装菜单输入域名，让 Certbot 自动签发和续期。自签名部署需要把公钥证书安全复制给每台 Worker，私钥只留在网关。
 
 ```bash
 openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 825 \
@@ -345,30 +377,21 @@ chmod 600 runtime/gateway.key
 .venv/bin/python run_gateway.py --check
 ```
 
-每台普通 Worker 使用独立 `WORKER_ID`，其环境文件只有网站、网关和 Cloudreve 配置，不含百度 Cookie：
+每台计算节点选择“仅 Worker”，使用独立 `WORKER_ID`；它只保存任务网站、网关和 Cloudreve 配置，不含百度 Cookie：
 
 ```bash
-sudo cp deploy/autobook-worker.service /etc/systemd/system/autobook-worker.service
-sudo install -m 600 deploy/examples/worker.env /etc/linux-autobook/worker.env
-sudo install -m 644 gateway.crt /opt/autobook-linux/runtime/gateway.crt
-sudo systemctl daemon-reload
-sudo systemctl enable --now autobook-worker.service
-
-systemctl status autobook-worker.service
-journalctl -u autobook-worker.service -f
+sudo bash install.sh
+# 选择：安装或重新配置 -> 仅 Worker
+# 输入中心网关 URL、共享令牌；公有证书的 CA 路径留空
 ```
 
-更新代码后：
+更新、查看状态或卸载均重新运行菜单：
 
 ```bash
-cd /opt/autobook-linux
-sudo systemctl stop autobook-worker.service
-sudo git pull --ff-only
-.venv/bin/pip install -r requirements.txt
-.venv/bin/python -m unittest discover -s tests -q
-.venv/bin/python run_worker.py --check
-sudo systemctl start autobook-worker.service
+sudo bash /opt/autobook-linux/install.sh
 ```
+
+“更新”会从 GitHub 取得干净源码，再调用相同安装流程；角色、配置、管理密码、百度凭据和 runtime 数据均保留。“卸载”默认先创建权限为 `0600` 的 `/var/backups/linux-autobook/backup-*.tar.gz`，非交互彻底卸载可使用 `--action uninstall --purge --non-interactive`。
 
 停止自动领取任务：
 
@@ -463,6 +486,19 @@ Worker 启动 ... concurrency=3
 
 ## 故障排查
 
+### Worker 启动不了或显示 inactive
+
+先打开管理面板“概况”和“快速设置”。最常见原因是遗漏任务网站 Token、中心网关 URL/令牌或结果网盘账号密码。面板会逐项列出，不完整时主动阻止启动。
+
+```bash
+systemctl status autobook-worker.service
+journalctl -u autobook-worker.service -n 80 --no-pager
+```
+
+配置未就绪会退出 78，并由 `RestartPreventExitStatus=78` 阻止重启风暴；这不是 systemd 故障。填写后在面板点击“保存并启动 Worker”，或先到“工具与诊断”运行预检。
+
+公有 CA 证书网关应把 `BAIDU_GATEWAY_CA_FILE` 留空。只有自签名/私有 CA 才填写证书路径；填写了不存在的路径也会被面板明确拦截。
+
 ### 缺少百度登录凭据
 
 错误包含“缺少配置：百度登录凭据”时执行：
@@ -526,6 +562,7 @@ Worker 会先自动尝试 4 MiB Range 回退和个人网盘转存。若最终仍
 .
 ├── autobook_linux/
 │   ├── archive.py           # 归档识别、密码测试和解压
+│   ├── admin_panel.py       # 向导式 HTTPS 管理面板
 │   ├── baidu_auth.py        # 百度二维码登录与凭据存储
 │   ├── baidu_pan.py         # 群搜索、转存、下载和回退
 │   ├── config.py            # .env 配置
@@ -542,6 +579,7 @@ Worker 会先自动尝试 4 MiB Range 回退和个人网盘转存。若最终仍
 │       └── upload_to_drive.py
 ├── deploy/
 │   ├── autobook-admin.service
+│   ├── autobook-cert-deploy.sh # Let's Encrypt 续期部署钩子
 │   ├── autobook-gateway.service
 │   ├── autobook-worker.service
 │   └── examples/
@@ -560,6 +598,7 @@ Worker 会先自动尝试 4 MiB Range 回退和个人网盘转存。若最终仍
 ## 第三方组件与接口说明
 
 - `vendor/pdg2pdf.py` 与 `vendor/pdg-decoder.wasm` 基于 MIT 许可项目 [bj5/pdg2pdf_open](https://github.com/bj5/pdg2pdf_open)，本项目在其上增加了兼容与完整性保护。
+- 可选受信任证书由开源 [Certbot](https://github.com/certbot/certbot) 通过 Let’s Encrypt ACME 服务签发和自动续期；未输入域名时不安装 Certbot。
 - 百度群文件库使用的是网页/桌面客户端相关接口，不是稳定承诺的公开 OpenAPI；百度更新接口后可能需要适配。
 - Cloudreve 上传实现面向 v4 API；不同实例的存储策略、权限和返回字段可能不同。
 

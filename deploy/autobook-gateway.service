@@ -2,6 +2,8 @@
 Description=linux-autobook central Baidu download gateway
 Wants=network-online.target
 After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -11,8 +13,9 @@ WorkingDirectory=/opt/autobook-linux
 EnvironmentFile=/etc/linux-autobook/gateway.env
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/autobook-linux/.venv/bin/python /opt/autobook-linux/run_gateway.py
-Restart=always
-RestartSec=10
+Restart=on-failure
+RestartPreventExitStatus=78
+RestartSec=20
 TimeoutStopSec=1800
 KillSignal=SIGTERM
 NoNewPrivileges=true

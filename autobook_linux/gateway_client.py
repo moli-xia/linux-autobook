@@ -21,14 +21,18 @@ class BaiduGatewayClient:
         self,
         base_url: str,
         token: str,
-        ca_file: Path,
+        ca_file: Path | None,
         timeout_seconds: int = 7200,
         poll_seconds: int = 3,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.poll_seconds = poll_seconds
-        self.verify = str(ca_file)
+        # An omitted CA file means the gateway uses a publicly trusted
+        # certificate (for example Let's Encrypt) and requests should use the
+        # operating-system trust store.  A path keeps certificate pinning for
+        # self-signed/private deployments.
+        self.verify: bool | str = str(ca_file) if ca_file else True
         self.session = requests.Session()
         self.session.headers.update(
             {

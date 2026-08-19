@@ -19,6 +19,7 @@ from autobook_linux.admin_panel import (
     AdminSettings,
     PasswordStore,
     apply_config_defaults,
+    configuration_issues,
     make_handler,
     read_env_file,
     write_env_file,
@@ -50,11 +51,45 @@ class AdminPasswordTests(unittest.TestCase):
 
 
 class AdminEnvironmentTests(unittest.TestCase):
+    def test_worker_readiness_explains_missing_required_credentials(self) -> None:
+        issues = configuration_issues(
+            "worker",
+            {},
+            {
+                "SITE_BASE_URL": "https://544544.xyz",
+                "BAIDU_GATEWAY_URL": "https://gateway.example:8765",
+                "BAIDU_GATEWAY_TOKEN": "shared-token",
+                "DRIVE_BASE_URL": "https://drive.example",
+            },
+        )
+        self.assertIn("未设置任务网站 Worker Token", issues)
+        self.assertIn("未设置结果网盘账号", issues)
+        self.assertIn("未设置结果网盘密码", issues)
+
+    def test_publicly_trusted_gateway_does_not_require_a_ca_file(self) -> None:
+        issues = configuration_issues(
+            "worker",
+            {},
+            {
+                "SITE_BASE_URL": "https://544544.xyz",
+                "WORKER_TOKEN": "site-token",
+                "BAIDU_GATEWAY_URL": "https://gateway.example:8765",
+                "BAIDU_GATEWAY_TOKEN": "shared-token",
+                "BAIDU_GATEWAY_CA_FILE": "",
+                "DRIVE_EMAIL": "configured@example.invalid",
+                "DRIVE_PASSWORD": "configured-password",
+                "DRIVE_BASE_URL": "https://drive.example",
+            },
+        )
+        self.assertEqual(issues, [])
+
     def test_defaults_restore_required_paths_but_not_optional_secrets(self) -> None:
-        values = {"BAIDU_AUTH_FILE": "", "BAIDU_BDUSS": ""}
+        values = {"BAIDU_AUTH_FILE": "", "BAIDU_BDUSS": "", "BAIDU_GATEWAY_CA_FILE": ""}
         apply_config_defaults(values, "gateway")
         self.assertEqual(values["BAIDU_AUTH_FILE"], "/opt/autobook-linux/runtime/baidu_credentials.json")
         self.assertEqual(values["BAIDU_BDUSS"], "")
+        apply_config_defaults(values, "worker")
+        self.assertEqual(values["BAIDU_GATEWAY_CA_FILE"], "")
 
     def test_environment_writer_round_trips_spaces_quotes_and_backslashes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

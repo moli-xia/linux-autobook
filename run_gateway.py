@@ -15,7 +15,11 @@ def main() -> int:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     config = Config.load()
-    config.validate_gateway()
+    try:
+        config.validate_gateway()
+    except RuntimeError as exc:
+        logging.getLogger(__name__).error("配置未就绪，请先在管理面板完成快速设置：%s", exc)
+        return 78
     manager = GatewayManager(config)
     manager.preflight()
     if args.check:
