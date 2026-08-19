@@ -21,6 +21,7 @@ from autobook_linux.archive import (
 )
 from autobook_linux.baidu_pan import BaiduPanClient
 from autobook_linux.config import Config
+from autobook_linux.gateway_client import BaiduGatewayClient
 from autobook_linux.library_index import LibraryIndex
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "vendor"))
@@ -62,10 +63,19 @@ def preferred_pdf_name(book_title: str, ssno: str, fallback_stem: str) -> str:
 
 
 class TaskPipeline:
-    def __init__(self, config: Config, baidu: BaiduPanClient, index: LibraryIndex) -> None:
+    def __init__(
+        self,
+        config: Config,
+        baidu: BaiduPanClient | None = None,
+        index: LibraryIndex | None = None,
+        gateway: BaiduGatewayClient | None = None,
+    ) -> None:
         self.config = config
         self.baidu = baidu
         self.index = index
+        self.gateway = gateway
+        if gateway is None and (baidu is None or index is None):
+            raise ValueError("直连模式需要 baidu 和 index；网关模式需要 gateway")
         self._gid: str | None = None
 
     @property
@@ -74,6 +84,8 @@ class TaskPipeline:
             if self.config.baidu_group_gid:
                 self._gid = self.config.baidu_group_gid
             else:
+                if self.baidu is None:
+                    raise PipelineError("网关模式不能在 Worker 端解析群组 gid")
                 self._gid = self.baidu.resolve_gid(self.config.baidu_group_name)
             LOGGER.info("群组 gid=%s", self._gid)
         return self._gid
@@ -92,18 +104,25 @@ class TaskPipeline:
         job_dir.mkdir(parents=True, exist_ok=True)
         dl_dir.mkdir(parents=True, exist_ok=True)
         try:
-            progress_cb(f"正在群文件库检索 SS={ssno}")
-            item = self.index.pick_best(self.gid, ssno)
-            if item is None:
-                raise PipelineError(f"群文件库中未找到 SS={ssno} 对应的文件")
-            LOGGER.info("选中群文件: %s (size=%d msg_id=%s)", item.name, item.size, item.msg_id)
-
-            progress_cb(f"转存并下载 {item.name}")
-            downloaded = self.baidu.fetch_group_file(
-                item,
-                save_dir=self.config.baidu_save_dir,
-                target_dir=dl_dir,
-            )
+            if self.gateway is not None:
+                progress_cb(f"正在通过百度下载网关检索并下载 SS={ssno}")
+                request_id = f"task-{task_id}-{task.get('lease_id') or task.get('token') or ssno}"
+                downloaded, source_name = self.gateway.fetch(ssno, request_id, dl_dir)
+                LOGGER.info("网关下载完成: %s", source_name)
+            else:
+                progress_cb(f"正在群文件库检索 SS={ssno}")
+                assert self.index is not None and self.baidu is not None
+                item = self.index.pick_best(self.gid, ssno)
+                if item is None:
+                    raise PipelineError(f"群文件库中未找到 SS={ssno} 对应的文件")
+                LOGGER.info("选中群文件: %s (size=%d msg_id=%s)", item.name, item.size, item.msg_id)
+                progress_cb(f"转存并下载 {item.name}")
+                downloaded = self.baidu.fetch_group_file(
+                    item,
+                    save_dir=self.config.baidu_save_dir,
+                    target_dir=dl_dir,
+                )
+                source_name = item.name
 
             progress_cb("生成 PDF")
             pdf_path = self._to_pdf(downloaded, job_dir, ssno, book_title)
@@ -117,7 +136,7 @@ class TaskPipeline:
             )
             share_url = result["share_url"]
             LOGGER.info("任务 %s 完成: %s", task_id, share_url)
-            return {"share_url": share_url, "pdf": pdf_path, "source": item.name}
+            return {"share_url": share_url, "pdf": pdf_path, "source": source_name}
         finally:
             shutil.rmtree(job_dir, ignore_errors=True)
             shutil.rmtree(dl_dir, ignore_errors=True)

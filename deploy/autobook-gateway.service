@@ -1,5 +1,5 @@
 [Unit]
-Description=linux-autobook concurrent document-delivery worker
+Description=linux-autobook central Baidu download gateway
 Wants=network-online.target
 After=network-online.target
 
@@ -8,13 +8,13 @@ Type=simple
 User=autobook
 Group=autobook
 WorkingDirectory=/opt/autobook-linux
-EnvironmentFile=/etc/linux-autobook/worker.env
-ExecStart=/opt/autobook-linux/.venv/bin/python /opt/autobook-linux/run_worker.py
+EnvironmentFile=/etc/linux-autobook/gateway.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/autobook-linux/.venv/bin/python /opt/autobook-linux/run_gateway.py
 Restart=always
 RestartSec=10
 TimeoutStopSec=1800
 KillSignal=SIGTERM
-Environment=PYTHONUNBUFFERED=1
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

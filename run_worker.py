@@ -53,9 +53,11 @@ def main() -> int:
     worker.preflight()
 
     if args.check:
-        print("预检通过：配置完整、百度登录正常、群组可解析。")
+        print("预检通过：配置完整，百度下载来源可用。")
         return 0
     if args.sync_index:
+        if worker.index is None:
+            parser.error("网关模式不在 Worker 上维护百度群文件索引；请在网关节点使用直连模式执行")
         count = worker.index.sync(worker.pipeline.gid, incremental=not args.full)
         print(f"索引同步完成，写入 {count} 条。")
         return 0
