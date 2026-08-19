@@ -11,6 +11,7 @@
 - 单个 Worker 内置线程池，可同时处理多个独立任务；默认并发数为 3。
 - 支持多台 Linux Worker 横向扩展；百度 Cookie 只保存在中心下载网关。
 - 网站任务使用 5 分钟可续租租约；Worker 每 60 秒心跳，宕机任务最多自动重排 3 次。
+- 内置 HTTPS 管理面板，可配置全部网关/Worker参数、扫码登录、密码字典、服务状态和日志。
 - 单个 Worker 串行请求领取；网站数据库原子分配任务，跨进程、跨服务器也不会重复领取。
 - 支持百度网盘 App 扫码登录，登录 Cookie 以 `0600` 权限保存。
 - 优先使用群文件短期直链；失败后自动转存到个人网盘临时目录。
@@ -30,7 +31,7 @@
 - 百度 CDN 对整文件和 8 MiB Range 返回 HTTP 403 时，4 MiB 顺序 Range 回退能够完整下载并通过大小校验。
 - 上传后的分享文件重新下载验证：文件大小与网盘元数据一致，PDF 可正常打开，242/242 页内容非空。
 - 三任务并发验证：SS `12607753`、`14686528`、`13128895` 在 1 秒内全部进入处理状态，分别在 15、19、34 秒后完成；两个 PDF 直传任务和一个 UVZ/242 页 PDG 转换任务均成功生成分享文件。
-- 本地和 Linux 服务器测试套件均通过 23 项测试。
+- 本地和 Linux 服务器测试套件均通过 29 项测试。
 - 分布式版本验证：12 个并发 claim 请求争抢 6 条合成任务时，恰好得到 6 个不同任务和 6 个不同租约；合法心跳全部续租，伪造租约、完成后的重复回调均被拒绝。
 - 中心网关真实取件验证：SS `12607753` 经群搜索、百度下载、HTTPS 流式传输及 SHA-256 校验，取得 17,584,393 字节 PDF，随后网关与 Worker 临时文件均被清理。
 
@@ -127,6 +128,42 @@ sudo apt-get install -y git python3 python3-venv python3-pip p7zip-full aria2
 
 ## 安装
 
+### 一键安装（推荐）
+
+在 Ubuntu/Debian 服务器取得完整仓库后执行：
+
+```bash
+git clone https://github.com/moli-xia/linux-autobook.git
+cd linux-autobook
+sudo bash install.sh
+```
+
+私有仓库可先使用已登录的 GitHub CLI：
+
+```bash
+gh repo clone moli-xia/linux-autobook && cd linux-autobook && sudo bash install.sh
+```
+
+脚本会自动安装系统依赖、创建 Python 虚拟环境和 `autobook` 系统用户，生成管理面板及下载网关的自签名 HTTPS 证书，安装三个 systemd 服务并运行测试。完成后终端会显示管理面板链接，例如：
+
+```text
+Admin panel: https://服务器IP:8766/
+Default username: admin
+Default password: admin
+```
+
+浏览器首次访问自签名证书会显示安全警告，这是预期现象。登录后应立即修改默认密码。网关和 Worker 在必需凭据配置完成前保持停止，避免用空配置反复重启。
+
+可选安装参数：
+
+```bash
+sudo bash install.sh --admin-port 8766 --public-host 203.0.113.10
+```
+
+重复运行脚本会更新程序和 systemd 文件，但保留 `/etc/linux-autobook/*.env`、管理密码、百度凭据、证书和运行数据。
+
+### 手工安装
+
 ```bash
 sudo git clone https://github.com/moli-xia/linux-autobook.git /opt/autobook-linux
 cd /opt/autobook-linux
@@ -145,6 +182,27 @@ chmod 600 .env password.txt
 ## 配置
 
 程序启动时读取项目根目录的 `.env`，但不会覆盖系统中已经存在的环境变量。
+
+## HTTPS 管理面板
+
+安装完成后访问脚本输出的链接。面板覆盖以下操作：
+
+- 编辑任务网站、原子租约、并发和 Worker 唯一标识；
+- 编辑中心网关地址、TLS 文件、缓存和下载并发；
+- 配置百度群名称/GID、临时目录、代理、Cookie 或发起 App 扫码登录；
+- 配置 aria2、工作目录、解压密码字典和 PDG DPI；
+- 配置 Cloudreve 账号、上传目录、存储策略和分享有效期；
+- 启动、停止或重启网关和 Worker，并查看最近 systemd 日志。
+
+安全机制：
+
+- 管理密码使用 PBKDF2-SHA256（600,000 次）和随机盐保存，不保存明文；
+- Session Cookie 带 `Secure`、`HttpOnly`、`SameSite=Strict`；
+- 所有写操作校验 CSRF，登录失败按来源 IP 限速；
+- 敏感配置字段不会回显，留空保存表示保持原值；
+- 配置文件以 `0600` 权限原子替换；面板只允许控制固定的网关和 Worker 服务。
+
+管理面板为了写入 root-only 配置和控制 systemd，以独立 root 服务运行。建议用防火墙把 `8766/tcp` 限制到可信管理 IP；生产环境可换成受信任 CA 证书。管理账号状态位于 `/etc/linux-autobook/admin-state.json`。
 
 ### 任务网站
 
@@ -483,6 +541,7 @@ Worker 会先自动尝试 4 MiB Range 回退和个人网盘转存。若最终仍
 │       ├── pdg-decoder.wasm # PDG WASM 解码器
 │       └── upload_to_drive.py
 ├── deploy/
+│   ├── autobook-admin.service
 │   ├── autobook-gateway.service
 │   ├── autobook-worker.service
 │   └── examples/
@@ -492,6 +551,8 @@ Worker 会先自动尝试 4 MiB Range 回退和个人网盘转存。若最终仍
 ├── .gitignore
 ├── password.example.txt
 ├── requirements.txt
+├── install.sh
+├── run_admin.py
 ├── run_worker.py
 └── run_gateway.py
 ```
