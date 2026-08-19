@@ -50,6 +50,14 @@ class Config:
     worker_queue: str          # pdf | ocr | all
     poll_seconds: int
     concurrency: int
+    lease_heartbeat_seconds: int
+
+    # --- central Baidu download gateway (worker side) ---
+    baidu_gateway_url: str
+    baidu_gateway_token: str
+    baidu_gateway_ca_file: Path | None
+    baidu_gateway_timeout_seconds: int
+    baidu_gateway_poll_seconds: int
 
     # --- baidu netdisk web api ---
     bduss: str
@@ -89,6 +97,15 @@ class Config:
     pdg_dpi: int
     full_sync_max_pages: int
 
+    # --- gateway server ---
+    gateway_bind: str
+    gateway_port: int
+    gateway_tls_cert: Path
+    gateway_tls_key: Path
+    gateway_concurrency: int
+    gateway_cache_ttl_seconds: int
+    gateway_job_root: Path
+
     @classmethod
     def load(cls) -> "Config":
         load_dotenv()
@@ -101,6 +118,12 @@ class Config:
             worker_queue=_get("WORKER_QUEUE", "pdf").lower() or "pdf",
             poll_seconds=_get_int("POLL_SECONDS", 15),
             concurrency=max(1, _get_int("CONCURRENCY", 3)),
+            lease_heartbeat_seconds=max(10, _get_int("LEASE_HEARTBEAT_SECONDS", 60)),
+            baidu_gateway_url=_get("BAIDU_GATEWAY_URL").rstrip("/"),
+            baidu_gateway_token=_get("BAIDU_GATEWAY_TOKEN"),
+            baidu_gateway_ca_file=(Path(_get("BAIDU_GATEWAY_CA_FILE")) if _get("BAIDU_GATEWAY_CA_FILE") else None),
+            baidu_gateway_timeout_seconds=max(60, _get_int("BAIDU_GATEWAY_TIMEOUT_SECONDS", 7200)),
+            baidu_gateway_poll_seconds=max(1, _get_int("BAIDU_GATEWAY_POLL_SECONDS", 3)),
             bduss=_get("BAIDU_BDUSS"),
             stoken=_get("BAIDU_STOKEN"),
             baiduid=_get("BAIDU_BAIDUID"),
@@ -138,6 +161,13 @@ class Config:
             drive_require_upload_date_verify=_get("DRIVE_REQUIRE_UPLOAD_DATE_VERIFY", "1") not in {"0", "false", "no"},
             pdg_dpi=_get_int("PDG_DPI", 200),
             full_sync_max_pages=_get_int("FULL_SYNC_MAX_PAGES", 2000),
+            gateway_bind=_get("GATEWAY_BIND", "127.0.0.1"),
+            gateway_port=max(1, _get_int("GATEWAY_PORT", 8765)),
+            gateway_tls_cert=Path(_get("GATEWAY_TLS_CERT", str(PROJECT_ROOT / "runtime" / "gateway.crt"))),
+            gateway_tls_key=Path(_get("GATEWAY_TLS_KEY", str(PROJECT_ROOT / "runtime" / "gateway.key"))),
+            gateway_concurrency=max(1, _get_int("GATEWAY_CONCURRENCY", 3)),
+            gateway_cache_ttl_seconds=max(60, _get_int("GATEWAY_CACHE_TTL_SECONDS", 3600)),
+            gateway_job_root=Path(_get("GATEWAY_JOB_ROOT", str(PROJECT_ROOT / "runtime" / "gateway" / "jobs"))),
         )
         return cfg
 
@@ -145,7 +175,14 @@ class Config:
         missing = []
         if not self.worker_token:
             missing.append("WORKER_TOKEN")
-        if bool(self.bduss) != bool(self.stoken):
+        if self.baidu_gateway_url:
+            if not self.baidu_gateway_url.startswith("https://"):
+                missing.append("BAIDU_GATEWAY_URL 必须使用 https://")
+            if not self.baidu_gateway_token:
+                missing.append("BAIDU_GATEWAY_TOKEN")
+            if not self.baidu_gateway_ca_file or not self.baidu_gateway_ca_file.is_file():
+                missing.append("BAIDU_GATEWAY_CA_FILE（网关证书）")
+        elif bool(self.bduss) != bool(self.stoken):
             missing.append("BAIDU_BDUSS 与 BAIDU_STOKEN 必须同时设置")
         elif not self.bduss and not self.baidu_auth_file.is_file():
             missing.append("百度登录凭据（请运行 --baidu-login）")
@@ -155,3 +192,18 @@ class Config:
             missing.append("DRIVE_PASSWORD")
         if missing:
             raise RuntimeError("缺少配置: " + ", ".join(missing))
+
+    def validate_gateway(self) -> None:
+        missing = []
+        if not self.baidu_gateway_token:
+            missing.append("BAIDU_GATEWAY_TOKEN")
+        if not self.gateway_tls_cert.is_file():
+            missing.append("GATEWAY_TLS_CERT")
+        if not self.gateway_tls_key.is_file():
+            missing.append("GATEWAY_TLS_KEY")
+        if bool(self.bduss) != bool(self.stoken):
+            missing.append("BAIDU_BDUSS 与 BAIDU_STOKEN 必须同时设置")
+        elif not self.bduss and not self.baidu_auth_file.is_file():
+            missing.append("百度登录凭据（请运行 --baidu-login）")
+        if missing:
+            raise RuntimeError("缺少网关配置: " + ", ".join(missing))

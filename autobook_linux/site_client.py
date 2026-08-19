@@ -5,7 +5,9 @@ Protocol (verified against the site's le_doc_delivery plugin):
        form: worker_token, worker_id, worker_queue(all|pdf|ocr)
        -> {kong_status:1, task:{id, token, book_title, ssno, keyword, queue_stage, ...}}
   POST {site}/index.php?doc_delivery-progress-ajax-1
-       form: worker_token, task_token, message
+       form: worker_token, worker_id, task_token, lease_id, message
+  POST {site}/index.php?doc_delivery-heartbeat-ajax-1
+       form: worker_token, worker_id, task_token, lease_id
   POST {site}/doc_delivery-complete-ajax-1 (same index.php query style)
        form: worker_token, task_token, worker_status(completed|failed),
              result_url, result_file, message, raw_output
@@ -18,6 +20,10 @@ from typing import Any
 import requests
 
 LOGGER = logging.getLogger(__name__)
+
+
+class LeaseLostError(RuntimeError):
+    pass
 
 
 class SiteClient:
@@ -50,14 +56,28 @@ class SiteClient:
             raise RuntimeError(f"claim 失败: {resp.get('message') or resp}")
         return resp.get("task")
 
-    def progress(self, task_token: str, message: str) -> None:
+    def progress(self, task_token: str, lease_id: str, message: str) -> None:
         try:
             self._post(
                 "doc_delivery-progress-ajax-1",
-                {"task_token": task_token, "message": message[:600]},
+                {
+                    "worker_id": self.worker_id,
+                    "task_token": task_token,
+                    "lease_id": lease_id,
+                    "message": message[:600],
+                },
             )
         except Exception as exc:  # progress is best-effort
             LOGGER.warning("progress 上报失败: %s", exc)
+
+    def heartbeat(self, task_token: str, lease_id: str) -> dict[str, Any]:
+        resp = self._post(
+            "doc_delivery-heartbeat-ajax-1",
+            {"worker_id": self.worker_id, "task_token": task_token, "lease_id": lease_id},
+        )
+        if not resp.get("kong_status"):
+            raise LeaseLostError(f"heartbeat 失败: {resp.get('message') or resp}")
+        return resp
 
     def complete(
         self,
@@ -67,11 +87,14 @@ class SiteClient:
         result_file: str = "",
         message: str = "",
         raw_output: str = "",
+        lease_id: str = "",
     ) -> dict[str, Any]:
         resp = self._post(
             "doc_delivery-complete-ajax-1",
             {
                 "task_token": task_token,
+                "worker_id": self.worker_id,
+                "lease_id": lease_id,
                 "worker_status": worker_status,
                 "result_url": result_url,
                 "result_file": result_file,

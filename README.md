@@ -1,6 +1,6 @@
 # linux-autobook
 
-在无图形界面的 Linux 服务器上运行的并发文献传递 Worker。它从任务网站领取包含 SS 号的任务，直接调用百度网盘群文件库的服务端搜索，下载命中的 PDF 或压缩包，必要时解压并将 PDG 页面合成为 PDF，最后上传到 Cloudreve 网盘、创建分享链接并回报任务结果。
+在无图形界面的 Linux 服务器上运行的分布式文献传递系统。中心下载网关独占百度登录 Cookie；任意数量的普通 Worker 通过 TLS 网关取得原始文件，解压并将 PDG 页面合成为 PDF，最后上传到 Cloudreve、创建分享链接并回报结果。网站使用原子租约领取，避免多台服务器重复处理同一任务。
 
 > 本项目只适用于你有权访问和传递的文献。请遵守内容版权、百度网盘服务条款、目标网站规则以及所在地法律。
 
@@ -9,7 +9,10 @@
 - 无需 Windows、百度网盘桌面客户端或 GUI 自动化，可在纯命令行 Linux 上运行。
 - 使用群文件库的服务端搜索接口按 SS 号检索，不需要递归扫描数百万文件。
 - 单个 Worker 内置线程池，可同时处理多个独立任务；默认并发数为 3。
-- 任务领取串行化，下载、解压、转换和上传并行化，降低重复领取风险。
+- 支持多台 Linux Worker 横向扩展；百度 Cookie 只保存在中心下载网关。
+- 网站任务使用 5 分钟可续租租约；Worker 每 60 秒心跳，宕机任务最多自动重排 3 次。
+- 内置 HTTPS 管理面板，可配置全部网关/Worker参数、扫码登录、密码字典、服务状态和日志。
+- 单个 Worker 串行请求领取；网站数据库原子分配任务，跨进程、跨服务器也不会重复领取。
 - 支持百度网盘 App 扫码登录，登录 Cookie 以 `0600` 权限保存。
 - 优先使用群文件短期直链；失败后自动转存到个人网盘临时目录。
 - 优先使用 aria2；百度 CDN 拒绝整文件或大 Range 请求时，自动改用 4 MiB 顺序分段下载。
@@ -28,20 +31,22 @@
 - 百度 CDN 对整文件和 8 MiB Range 返回 HTTP 403 时，4 MiB 顺序 Range 回退能够完整下载并通过大小校验。
 - 上传后的分享文件重新下载验证：文件大小与网盘元数据一致，PDF 可正常打开，242/242 页内容非空。
 - 三任务并发验证：SS `12607753`、`14686528`、`13128895` 在 1 秒内全部进入处理状态，分别在 15、19、34 秒后完成；两个 PDF 直传任务和一个 UVZ/242 页 PDG 转换任务均成功生成分享文件。
-- 本地和 Linux 服务器测试套件均通过 20 项测试。
+- 本地和 Linux 服务器测试套件均通过 29 项测试。
+- 分布式版本验证：12 个并发 claim 请求争抢 6 条合成任务时，恰好得到 6 个不同任务和 6 个不同租约；合法心跳全部续租，伪造租约、完成后的重复回调均被拒绝。
+- 中心网关真实取件验证：SS `12607753` 经群搜索、百度下载、HTTPS 流式传输及 SHA-256 校验，取得 17,584,393 字节 PDF，随后网关与 Worker 临时文件均被清理。
 
 以上记录用于说明已覆盖的路径，不保证任何百度接口、第三方网站或所有 PDG 变体永久兼容。
 
 ## 工作流程
 
 ```text
-任务网站待处理队列
+任务网站待处理队列（原子领取 + 可续租租约）
         │
         ▼
 串行领取任务并提取 SS 号
         │
         ▼
-百度群文件库服务端搜索 ──► 本地 SQLite 缓存搜索结果
+中心 HTTPS 百度下载网关 ──► 群文件库服务端搜索
         │
         ▼
 选择 PDF / 归档文件 ──► 直链下载 ──► 转存下载回退
@@ -123,6 +128,42 @@ sudo apt-get install -y git python3 python3-venv python3-pip p7zip-full aria2
 
 ## 安装
 
+### 一键安装（推荐）
+
+在 Ubuntu/Debian 服务器取得完整仓库后执行：
+
+```bash
+git clone https://github.com/moli-xia/linux-autobook.git
+cd linux-autobook
+sudo bash install.sh
+```
+
+私有仓库可先使用已登录的 GitHub CLI：
+
+```bash
+gh repo clone moli-xia/linux-autobook && cd linux-autobook && sudo bash install.sh
+```
+
+脚本会自动安装系统依赖、创建 Python 虚拟环境和 `autobook` 系统用户，生成管理面板及下载网关的自签名 HTTPS 证书，安装三个 systemd 服务并运行测试。完成后终端会显示管理面板链接，例如：
+
+```text
+Admin panel: https://服务器IP:8766/
+Default username: admin
+Default password: admin
+```
+
+浏览器首次访问自签名证书会显示安全警告，这是预期现象。登录后应立即修改默认密码。网关和 Worker 在必需凭据配置完成前保持停止，避免用空配置反复重启。
+
+可选安装参数：
+
+```bash
+sudo bash install.sh --admin-port 8766 --public-host 203.0.113.10
+```
+
+重复运行脚本会更新程序和 systemd 文件，但保留 `/etc/linux-autobook/*.env`、管理密码、百度凭据、证书和运行数据。
+
+### 手工安装
+
 ```bash
 sudo git clone https://github.com/moli-xia/linux-autobook.git /opt/autobook-linux
 cd /opt/autobook-linux
@@ -142,6 +183,27 @@ chmod 600 .env password.txt
 
 程序启动时读取项目根目录的 `.env`，但不会覆盖系统中已经存在的环境变量。
 
+## HTTPS 管理面板
+
+安装完成后访问脚本输出的链接。面板覆盖以下操作：
+
+- 编辑任务网站、原子租约、并发和 Worker 唯一标识；
+- 编辑中心网关地址、TLS 文件、缓存和下载并发；
+- 配置百度群名称/GID、临时目录、代理、Cookie 或发起 App 扫码登录；
+- 配置 aria2、工作目录、解压密码字典和 PDG DPI；
+- 配置 Cloudreve 账号、上传目录、存储策略和分享有效期；
+- 启动、停止或重启网关和 Worker，并查看最近 systemd 日志。
+
+安全机制：
+
+- 管理密码使用 PBKDF2-SHA256（600,000 次）和随机盐保存，不保存明文；
+- Session Cookie 带 `Secure`、`HttpOnly`、`SameSite=Strict`；
+- 所有写操作校验 CSRF，登录失败按来源 IP 限速；
+- 敏感配置字段不会回显，留空保存表示保持原值；
+- 配置文件以 `0600` 权限原子替换；面板只允许控制固定的网关和 Worker 服务。
+
+管理面板为了写入 root-only 配置和控制 systemd，以独立 root 服务运行。建议用防火墙把 `8766/tcp` 限制到可信管理 IP；生产环境可换成受信任 CA 证书。管理账号状态位于 `/etc/linux-autobook/admin-state.json`。
+
 ### 任务网站
 
 | 变量 | 默认值 | 说明 |
@@ -152,8 +214,21 @@ chmod 600 .env password.txt
 | `WORKER_QUEUE` | `pdf` | 领取队列：`pdf`、`ocr` 或网站支持的其他值 |
 | `POLL_SECONDS` | `15` | 队列为空或领取失败后的等待秒数 |
 | `CONCURRENCY` | `3` | 同时处理的任务上限，最小值为 1 |
+| `LEASE_HEARTBEAT_SECONDS` | `60` | Worker 续租间隔；必须明显小于网站的 300 秒租约 |
+
+### 百度下载网关（普通 Worker）
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `BAIDU_GATEWAY_URL` | 空 | 中心网关 HTTPS 地址；设置后 Worker 不读取百度 Cookie |
+| `BAIDU_GATEWAY_TOKEN` | 空 | Worker 与网关共享的高强度随机令牌 |
+| `BAIDU_GATEWAY_CA_FILE` | `runtime/gateway.crt` | 网关证书/私有 CA，用于固定校验，禁止关闭证书验证 |
+| `BAIDU_GATEWAY_TIMEOUT_SECONDS` | `7200` | 单次检索下载总等待时间 |
+| `BAIDU_GATEWAY_POLL_SECONDS` | `3` | 网关任务状态轮询间隔 |
 
 ### 百度网盘
+
+以下凭据只配置在中心网关。普通 Worker 不需要也不应复制这些值。
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -171,7 +246,17 @@ chmod 600 .env password.txt
 | `ARIA2_MAX_CONNECTION` | `16` | aria2 单服务器连接上限 |
 | `DOWNLOAD_TIMEOUT_SECONDS` | `1800` | 下载、解压等长操作超时 |
 
-`BAIDU_SAVE_DIR` 必须是专用目录。Worker 预检和任务结束可能清理其中的临时转存文件，不要在该目录存放个人文件。
+`BAIDU_SAVE_DIR` 必须是专用目录。网关按 job ID 使用独立子目录并在下载后清理，不要在该目录存放个人文件。
+
+### 网关服务端
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `GATEWAY_BIND` / `GATEWAY_PORT` | `127.0.0.1` / `8765` | 网关监听地址与端口；跨主机时设 `0.0.0.0` 并配置防火墙 |
+| `GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY` | `runtime/gateway.crt/key` | TLS 证书与私钥 |
+| `GATEWAY_CONCURRENCY` | `3` | 同时进行的百度检索/下载数 |
+| `GATEWAY_CACHE_TTL_SECONDS` | `3600` | Worker 未取走结果时的缓存寿命 |
+| `GATEWAY_JOB_ROOT` | `runtime/gateway/jobs` | 网关隔离任务目录 |
 
 ### 本地路径
 
@@ -237,12 +322,35 @@ cd /opt/autobook-linux
 .venv/bin/python run_worker.py
 ```
 
-## systemd 常驻服务
+## 分布式部署与 systemd 常驻
 
-仓库提供 `deploy/autobook-worker.service`。默认安装路径为 `/opt/autobook-linux`，以 root 运行以兼容简单部署；生产环境可按实际权限改为专用用户。
+仓库提供网关和 Worker 两个服务，默认以权限受限的 `autobook` 用户运行。先在一台可信服务器部署网关：
+
+```bash
+sudo useradd --system --home /opt/autobook-linux --shell /usr/sbin/nologin autobook
+sudo install -d -o autobook -g autobook /opt/autobook-linux/runtime /etc/linux-autobook
+sudo cp deploy/autobook-gateway.service /etc/systemd/system/
+sudo install -m 600 deploy/examples/gateway.env /etc/linux-autobook/gateway.env
+sudo systemctl daemon-reload
+sudo systemctl enable --now autobook-gateway.service
+```
+
+网关 TLS 证书必须包含实际域名或 IP 的 SAN。自签名部署可生成证书后，把公钥证书安全复制给每台 Worker；私钥只留在网关：
+
+```bash
+openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 825 \
+  -keyout runtime/gateway.key -out runtime/gateway.crt \
+  -subj '/CN=gateway.example' -addext 'subjectAltName=DNS:gateway.example'
+chmod 600 runtime/gateway.key
+.venv/bin/python run_gateway.py --check
+```
+
+每台普通 Worker 使用独立 `WORKER_ID`，其环境文件只有网站、网关和 Cloudreve 配置，不含百度 Cookie：
 
 ```bash
 sudo cp deploy/autobook-worker.service /etc/systemd/system/autobook-worker.service
+sudo install -m 600 deploy/examples/worker.env /etc/linux-autobook/worker.env
+sudo install -m 644 gateway.crt /opt/autobook-linux/runtime/gateway.crt
 sudo systemctl daemon-reload
 sudo systemctl enable --now autobook-worker.service
 
@@ -268,7 +376,9 @@ sudo systemctl start autobook-worker.service
 sudo systemctl disable --now autobook-worker.service
 ```
 
-不要同时启动多个使用相同 `WORKER_ID` 的常驻进程。确认方法：
+不要让两台主机使用相同 `WORKER_ID`。网站插件文件位于 `site_plugin/`，部署说明见该目录 README。租约令牌同时绑定任务、Worker ID 和处理状态；旧 Worker 的迟到回调会被拒绝。
+
+确认本机进程：
 
 ```bash
 pgrep -af '[r]un_worker.py'
@@ -405,6 +515,8 @@ Worker 会先自动尝试 4 MiB Range 回退和个人网盘转存。若最终仍
 - `.env`、`runtime/`、`password.txt`、Cookie、二维码、PDF 和下载文件均由 `.gitignore` 排除。
 - 扫码 Cookie 文件使用 `0600` 权限；请同时限制项目目录和服务器 SSH 权限。
 - 不要在 Issue、日志或截图中发布 `WORKER_TOKEN`、BDUSS、STOKEN、Cloudreve 密码、临时 dlink 或任务 token。
+- `BAIDU_GATEWAY_TOKEN` 也属于高敏感凭据；网关必须使用 HTTPS，Worker 必须校验证书。
+- 用防火墙把网关端口限制到 Worker 出口 IP；令牌泄露时同时轮换网关和所有 Worker 的环境文件。
 - 任务网站接口、百度群文件接口均应启用 HTTPS。
 - 分享链接本身代表临时读取权限，请按需缩短 `DRIVE_EXPIRE_DAYS`。
 
@@ -417,6 +529,8 @@ Worker 会先自动尝试 4 MiB Range 回退和个人网盘转存。若最终仍
 │   ├── baidu_auth.py        # 百度二维码登录与凭据存储
 │   ├── baidu_pan.py         # 群搜索、转存、下载和回退
 │   ├── config.py            # .env 配置
+│   ├── gateway_client.py    # Worker 侧 HTTPS 下载客户端
+│   ├── gateway_server.py    # 中心百度下载网关
 │   ├── library_index.py     # 搜索结果 SQLite 缓存与选择
 │   ├── pdg_crypto.py        # 03H/11H 兼容转换
 │   ├── pipeline.py          # 单任务端到端流水线
@@ -427,13 +541,20 @@ Worker 会先自动尝试 4 MiB Range 回退和个人网盘转存。若最终仍
 │       ├── pdg-decoder.wasm # PDG WASM 解码器
 │       └── upload_to_drive.py
 ├── deploy/
-│   └── autobook-worker.service
+│   ├── autobook-admin.service
+│   ├── autobook-gateway.service
+│   ├── autobook-worker.service
+│   └── examples/
+├── site_plugin/             # 544544.xyz 原子租约插件文件
 ├── tests/
 ├── .env.example
 ├── .gitignore
 ├── password.example.txt
 ├── requirements.txt
-└── run_worker.py
+├── install.sh
+├── run_admin.py
+├── run_worker.py
+└── run_gateway.py
 ```
 
 ## 第三方组件与接口说明

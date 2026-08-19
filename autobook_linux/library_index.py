@@ -42,6 +42,21 @@ CREATE TABLE IF NOT EXISTS sync_state (
 """
 
 
+def pick_best_file(candidates: list[GroupShareFile], ssno: str) -> GroupShareFile | None:
+    """Choose a deterministic best match without requiring a local index."""
+    if not candidates:
+        return None
+
+    def score(item: GroupShareFile) -> tuple[int, int, int]:
+        stem = item.name.rsplit(".", 1)[0] if "." in item.name else item.name
+        exact_rank = 0 if stem == ssno else 1
+        suffix = item.name.rsplit(".", 1)[-1].lower() if "." in item.name else ""
+        type_rank = 0 if suffix == "pdf" else (1 if f".{suffix}" in ARCHIVE_SUFFIXES else 2)
+        return (type_rank, exact_rank, -item.server_mtime)
+
+    return sorted(candidates, key=score)[0]
+
+
 class LibraryIndex:
     def __init__(self, db_path: Path, client: BaiduPanClient, full_sync_max_pages: int = 2000) -> None:
         self.db_path = db_path
@@ -208,15 +223,4 @@ class LibraryIndex:
         This avoids downloading and converting an archive when the group
         search already returned a ready-to-use PDF for the same SS code.
         """
-        candidates = self.search(gid, ssno)
-        if not candidates:
-            return None
-
-        def score(item: GroupShareFile) -> tuple[int, int, int]:
-            stem = item.name.rsplit(".", 1)[0] if "." in item.name else item.name
-            exact_rank = 0 if stem == ssno else 1
-            suffix = item.name.rsplit(".", 1)[-1].lower() if "." in item.name else ""
-            type_rank = 0 if suffix == "pdf" else (1 if f".{suffix}" in ARCHIVE_SUFFIXES else 2)
-            return (type_rank, exact_rank, -item.server_mtime)
-
-        return sorted(candidates, key=score)[0]
+        return pick_best_file(self.search(gid, ssno), ssno)

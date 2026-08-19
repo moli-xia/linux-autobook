@@ -1,0 +1,23 @@
+[Unit]
+Description=linux-autobook HTTPS administration panel
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/autobook-linux
+EnvironmentFile=/etc/linux-autobook/admin.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/autobook-linux/.venv/bin/python /opt/autobook-linux/run_admin.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/etc/linux-autobook /opt/autobook-linux/runtime /opt/autobook-linux/password.txt
+
+[Install]
+WantedBy=multi-user.target
