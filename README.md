@@ -189,6 +189,25 @@ sudo bash install.sh --action install --role all \
 
 没有域名时自动生成包含实际 IP/主机名 SAN 的自签名证书，浏览器首次访问会显示安全警告。Worker 连接自签名网关时填写 `BAIDU_GATEWAY_CA_FILE`；连接 Let’s Encrypt 等公有 CA 网关时留空，使用系统信任库。
 
+### Docker 部署（支持 amd64 与 arm64）
+
+镜像把管理面板、下载网关和 Worker 打包在一起，由面板内置的进程管理器托管，不依赖 systemd。
+完整说明见 **[docs/Docker部署说明.md](docs/Docker部署说明.md)**。
+
+```bash
+git clone https://github.com/moli-xia/linux-autobook.git && cd linux-autobook
+cp docker/.env.example .env      # 至少填写 AUTOBOOK_PUBLIC_HOST
+docker compose up -d
+```
+
+首次启动会自动生成两套自签名证书和随机共享令牌、写好全部默认配置、
+并用内置的 307 条常见密码初始化解压字典。配置与运行数据放在具名卷里，升级不丢。
+
+`AUTOBOOK_ROLE` 控制角色：`all`（网关 + Worker）、`gateway`、`worker`。
+自建镜像用 `./docker/build.sh`，默认同时构建 `linux/amd64` 与 `linux/arm64`。
+
+容器部署与 systemd 部署可以混用，两者只通过 HTTPS + 共享令牌通信。
+
 ### 手工安装
 
 ```bash
@@ -229,6 +248,7 @@ chmod 600 .env password.txt
 | **百度登录** | 网关节点扫码登录，状态自动轮询，成功后自动重启网关 |
 | **运行日志** | 选服务 / 行数 / 关键字过滤 / 自动刷新，敏感内容自动打码 |
 | **任务记录** | 从 Worker 日志还原的任务表：书名、状态、进度、交付链接 |
+| **解压密码** | 内置 307 条常见解压密码，可逐条增删改、搜索、批量编辑 |
 | **维护** | 依赖修复、权限修复、证书重生成、备份、在线更新、角色切换、密码字典编辑 |
 
 面板相比手工配置的价值：
@@ -602,6 +622,9 @@ Worker 会先自动尝试 4 MiB Range 回退和个人网盘转存。若最终仍
 │   │   ├── jobs.py          # 后台任务与 systemd 托管执行
 │   │   ├── baidu.py         # 扫码登录流程
 │   │   ├── auth.py          # 口令、会话与登录限速
+│   │   ├── passwords.py     # 解压密码字典的读写与增删改
+│   │   ├── supervisor.py    # 容器内的进程管理器（systemd 的替代）
+│   │   ├── data/            # 内置解压密码字典
 │   │   └── static/          # 单页前端（HTML/CSS/JS）
 │   └── vendor/
 │       ├── pdg2pdf.py       # PDG 转换器
@@ -613,14 +636,21 @@ Worker 会先自动尝试 4 MiB Range 回退和个人网盘转存。若最终仍
 │   ├── autobook-gateway.service
 │   ├── autobook-worker.service
 │   └── examples/
+├── docker/
+│   ├── build.sh             # 多架构镜像构建脚本
+│   ├── entrypoint.sh        # 容器首次启动的自动配置
+│   └── .env.example
 ├── docs/
-│   └── 管理面板使用说明.md   # 面板完整操作手册
+│   ├── 管理面板使用说明.md   # 面板完整操作手册
+│   └── Docker部署说明.md     # 容器部署手册
 ├── site_plugin/             # 544544.xyz 原子租约插件文件
 ├── tests/
 ├── .env.example
 ├── .gitignore
 ├── password.example.txt
 ├── requirements.txt
+├── Dockerfile
+├── docker-compose.yml
 ├── install.sh
 ├── run_admin.py
 ├── run_worker.py
