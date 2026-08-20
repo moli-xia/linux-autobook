@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Build the multi-architecture linux-autobook image.
+# Build the multi-architecture autobook image.
 #
 #   ./docker/build.sh                      # 构建 amd64 + arm64 并推送到默认仓库
-#   IMAGE=me/autobook:1.0 ./docker/build.sh
+#   IMAGE=ghcr.io/me/autobook:1.0 ./docker/build.sh
 #   PLATFORMS=linux/amd64 PUSH=0 ./docker/build.sh   # 只构建本机架构并加载到本地
 set -Eeuo pipefail
 
-IMAGE="${IMAGE:-moli-xia/linux-autobook:latest}"
+IMAGE="${IMAGE:-ghcr.io/moli-xia/autobook:latest}"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 PUSH="${PUSH:-1}"
 BUILDER="${BUILDER:-autobook-builder}"
@@ -26,7 +26,7 @@ output=(--push)
 if [[ "$PUSH" != "1" ]]; then
   if [[ "$PLATFORMS" == *,* ]]; then
     # A local docker image can hold only one architecture; keep the manifest in an OCI archive.
-    output=(--output "type=oci,dest=$ROOT/linux-autobook-multiarch.tar")
+    output=(--output "type=oci,dest=$ROOT/autobook-multiarch.tar")
   else
     output=(--load)
   fi

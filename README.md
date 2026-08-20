@@ -1,8 +1,45 @@
-# linux-autobook
+# autobook
 
-在无图形界面的 Linux 服务器上运行的分布式文献传递系统。中心下载网关独占百度登录 Cookie；任意数量的普通 Worker 通过 TLS 网关取得原始文件，解压并将 PDG 页面合成为 PDF，最后上传到 Cloudreve、创建分享链接并回报结果。网站使用原子租约领取，避免多台服务器重复处理同一任务。
+在无图形界面的 Linux 服务器上运行的分布式文献传递系统。中心下载网关独占百度登录 Cookie；
+任意数量的 Worker 通过 TLS 网关取得原始文件，解压并将 PDG 页面合成为 PDF，
+最后上传到 Cloudreve、创建分享链接并回报结果。网站使用原子租约领取，
+避免多台服务器重复处理同一任务。
+
+全部日常操作都在**中文 Web 管理面板**里完成：配置、扫码登录、连通性检测、日志、
+任务记录、解压密码字典，以及从主服务器**统一管控所有 Worker 节点**。
+支持 `install.sh`（systemd）和 **Docker 镜像（amd64 / arm64）**两种部署方式，可混用。
 
 > 本项目只适用于你有权访问和传递的文献。请遵守内容版权、百度网盘服务条款、目标网站规则以及所在地法律。
+
+## 快速开始
+
+三选一，装完都是同一个面板（默认账号密码 `admin` / `admin`，**登录后请立刻修改**）。
+
+**A. Docker（推荐，amd64 与 arm64 通用）**
+
+```bash
+git clone https://github.com/moli-xia/autobook.git && cd autobook
+cp docker/.env.example .env      # 至少填写 AUTOBOOK_PUBLIC_HOST=你的服务器IP
+docker compose up -d
+```
+
+**B. systemd 一键安装**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/moli-xia/autobook/main/install.sh -o install.sh
+sudo bash install.sh             # 交互菜单，全部回车即可
+```
+
+**C. 加一台 Worker 到已有集群**
+
+按 A 或 B 装好后，在新机器面板的「维护 → 接入主服务器」复制接入码，
+粘贴到主服务器的「节点管理」页，再用「配置下发」一键推送令牌、网盘账号和网关证书。
+
+装完打开 `https://你的服务器IP:8766/`（自签名证书会提示风险，选择继续访问），
+按左侧「配置向导」逐步填写，点「连通性检测」全绿后启动服务。
+
+完整手册：**[管理面板使用说明](docs/管理面板使用说明.md)** ·
+**[Docker 部署说明](docs/Docker部署说明.md)**
 
 ## 功能概览
 
@@ -11,7 +48,10 @@
 - 单个 Worker 内置线程池，可同时处理多个独立任务；默认并发数为 3。
 - 支持多台 Linux Worker 横向扩展；百度 Cookie 只保存在中心下载网关。
 - 网站任务使用 5 分钟可续租租约；Worker 每 60 秒心跳，宕机任务最多自动重排 3 次。
-- 内置 HTTPS 管理面板，可配置全部网关/Worker参数、扫码登录、密码字典、服务状态和日志。
+- 内置中文 Web 管理面板：分步配置向导、逐项说明、实测式连通性检测、实时日志、任务记录。
+- 主服务器可统一管理所有 Worker 节点：查看状态与任务、远程启停服务、一键下发配置与证书。
+- 内置 307 条常见解压密码，面板内可增删改；新装节点开箱即用。
+- 提供多架构 Docker 镜像（linux/amd64 与 linux/arm64），容器内自带进程管理器，不依赖 systemd。
 - 单个 Worker 串行请求领取；网站数据库原子分配任务，跨进程、跨服务器也不会重复领取。
 - 支持百度网盘 App 扫码登录，登录 Cookie 以 `0600` 权限保存。
 - 优先使用群文件短期直链；失败后自动转存到个人网盘临时目录。
@@ -31,7 +71,7 @@
 - 百度 CDN 对整文件和 8 MiB Range 返回 HTTP 403 时，4 MiB 顺序 Range 回退能够完整下载并通过大小校验。
 - 上传后的分享文件重新下载验证：文件大小与网盘元数据一致，PDF 可正常打开，242/242 页内容非空。
 - 三任务并发验证：SS `12607753`、`14686528`、`13128895` 在 1 秒内全部进入处理状态，分别在 15、19、34 秒后完成；两个 PDF 直传任务和一个 UVZ/242 页 PDG 转换任务均成功生成分享文件。
-- 本地和 Linux 服务器测试套件均通过 31 项测试。
+- 本地、Linux 服务器与镜像构建过程中的测试套件均通过 99 项测试。
 - 分布式版本验证：12 个并发 claim 请求争抢 6 条合成任务时，恰好得到 6 个不同任务和 6 个不同租约；合法心跳全部续租，伪造租约、完成后的重复回调均被拒绝。
 - 中心网关真实取件验证：SS `12607753` 经群搜索、百度下载、HTTPS 流式传输及 SHA-256 校验，取得 17,584,393 字节 PDF，随后网关与 Worker 临时文件均被清理。
 
@@ -104,14 +144,16 @@ Cloudreve 分片上传 ──► 创建限时分享链接
 
 ## 系统要求
 
-推荐：
+**用 Docker 部署时**只需要装好 Docker，其余依赖都在镜像里，可跳过本节。
 
-- Ubuntu 22.04 / 24.04 或兼容的 Debian 系发行版；
+自行安装（systemd 方式）推荐：
+
+- Ubuntu 22.04 / 24.04 或兼容的 Debian 系发行版（x86_64 或 arm64）；
 - Python 3.10 及以上；
-- 7-Zip（Ubuntu 包通常为 `p7zip-full`）；
+- 7-Zip（Ubuntu 包通常为 `p7zip-full`，自带 Rar/Rar5 解压支持）；
 - aria2；
-- 至少 2 CPU、4 GiB 内存；并发 3 建议 4 CPU、8 GiB 以上；
-- 足够容纳多个任务同时下载和解压的磁盘空间。
+- 每个并发任务约需 1 CPU 核心和 1 GiB 内存：1 核 2 GiB 填并发 1，4 核 8 GiB 填并发 3；
+- 足够容纳多个任务同时下载和解压的磁盘空间，建议至少保留 10 GiB。
 
 安装系统依赖：
 
@@ -133,15 +175,15 @@ sudo apt-get install -y git python3 python3-venv python3-pip p7zip-full aria2
 在 Ubuntu/Debian 服务器取得完整仓库后执行：
 
 ```bash
-git clone https://github.com/moli-xia/linux-autobook.git
-cd linux-autobook
+git clone https://github.com/moli-xia/autobook.git
+cd autobook
 sudo bash install.sh
 ```
 
 私有仓库可先使用已登录的 GitHub CLI：
 
 ```bash
-gh repo clone moli-xia/linux-autobook && cd linux-autobook && sudo bash install.sh
+gh repo clone moli-xia/autobook && cd autobook && sudo bash install.sh
 ```
 
 不带参数运行时会显示中文菜单，可选择：
@@ -195,7 +237,7 @@ sudo bash install.sh --action install --role all \
 完整说明见 **[docs/Docker部署说明.md](docs/Docker部署说明.md)**。
 
 ```bash
-git clone https://github.com/moli-xia/linux-autobook.git && cd linux-autobook
+git clone https://github.com/moli-xia/autobook.git && cd autobook
 cp docker/.env.example .env      # 至少填写 AUTOBOOK_PUBLIC_HOST
 docker compose up -d
 ```
@@ -211,7 +253,7 @@ docker compose up -d
 ### 手工安装
 
 ```bash
-sudo git clone https://github.com/moli-xia/linux-autobook.git /opt/autobook-linux
+sudo git clone https://github.com/moli-xia/autobook.git /opt/autobook-linux
 cd /opt/autobook-linux
 
 python3 -m venv .venv
@@ -491,7 +533,9 @@ cd /opt/autobook-linux
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-测试覆盖：
+共 99 项测试，覆盖：
+
+**文献处理**
 
 - SS 号提取和输出文件名；
 - 群文件库搜索签名、结果过滤和映射；
@@ -501,6 +545,23 @@ cd /opt/autobook-linux
 - SQLite 索引选择优先级；
 - 03H/11H PDG 兼容处理；
 - 页面解码失败时禁止生成空白占位页。
+
+**管理面板**
+
+- 配置文件的引号往返、原子写入与 0600 权限；
+- 就绪判定规则、数字上下限、敏感项留空保持原值；
+- 登录限速、会话过期、CSRF 请求头校验、静态路径穿越防护；
+- 解压密码字典的增删改、去重、恢复/合并内置字典；
+- 容器内进程管理器的启停、日志捕获与退出码 78 停止重启规则。
+
+**节点管理**
+
+- 接入码往返与非法输入拒绝、接入令牌轮换失效；
+- 证书指纹不匹配时拒绝连接、令牌错误时拒绝请求；
+- 接入令牌只能访问白名单接口，管理账号与节点管理路由不可达；
+- 两个面板之间真实 TLS 联调：状态、任务、日志、检测、配置与证书下发。
+
+Docker 镜像在构建过程中会跑一遍完整测试，测试不过就不会产出镜像。
 
 单元测试不会替代真实账号、群组、百度 CDN、任务网站和 Cloudreve 的端到端测试。
 

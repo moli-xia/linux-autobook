@@ -1,12 +1,12 @@
-# linux-autobook — panel, gateway and worker in one multi-architecture image.
+# autobook — panel, gateway and worker in one multi-architecture image.
 #
 # The image works on linux/amd64 and linux/arm64.  Build it with:
-#   docker buildx build --platform linux/amd64,linux/arm64 -t <repo>/linux-autobook:latest --push .
+#   docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/<owner>/autobook:latest --push .
 FROM python:3.12-slim-bookworm
 
-LABEL org.opencontainers.image.title="linux-autobook" \
+LABEL org.opencontainers.image.title="autobook" \
       org.opencontainers.image.description="文献传递集群：管理面板 + 百度下载网关 + 任务 Worker" \
-      org.opencontainers.image.source="https://github.com/moli-xia/linux-autobook" \
+      org.opencontainers.image.source="https://github.com/moli-xia/autobook" \
       org.opencontainers.image.licenses="MIT"
 
 ENV DEBIAN_FRONTEND=noninteractive \
