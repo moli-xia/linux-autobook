@@ -299,26 +299,36 @@ def check_drive(values: dict[str, str]) -> CheckResult:
 
 
 def check_paths(values: dict[str, str], service_user: str = "autobook") -> CheckResult:
+    """Check that the service account can write its working directories.
+
+    This must never create the directories itself: the panel runs as root, so a
+    directory it created would be root-owned and unusable by the service.
+    """
     problems: list[str] = []
+    pending: list[str] = []
     for key in ("WORK_ROOT", "DOWNLOAD_ROOT"):
         raw = values.get(key)
         if not raw:
             continue
         target = Path(raw)
-        try:
-            target.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            problems.append(f"{raw}: {exc}")
+        probe_path = target if target.is_dir() else target.parent
+        if not probe_path.is_dir():
+            problems.append(f"{raw}: 上级目录不存在")
             continue
         probe = subprocess.run(
-            ["runuser", "--user", service_user, "--", "test", "-w", str(target)],
+            ["runuser", "--user", service_user, "--", "test", "-w", str(probe_path)],
             capture_output=True, text=True, timeout=15,
         )
         if probe.returncode != 0:
             problems.append(f"{raw}: 服务账号 {service_user} 无写入权限")
+        elif not target.is_dir():
+            pending.append(raw)
     if problems:
         return CheckResult("paths", "工作目录权限", "fail", "；".join(problems),
                            "在「维护」页面点击「修复目录权限」即可自动纠正属主。")
+    if pending:
+        return CheckResult("paths", "工作目录权限", "ok",
+                           "可写；" + "、".join(pending) + " 将在首次运行时自动创建")
     return CheckResult("paths", "工作目录权限", "ok", "工作目录与下载目录均可写")
 
 
