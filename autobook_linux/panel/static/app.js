@@ -18,6 +18,11 @@
     passwordFilter: "",
     passwordBulk: false,
     editingPassword: null,
+    fleet: null,
+    fleetDetail: null,
+    fleetSelection: [],
+    fleetBusy: {},
+    joinCode: null,
     jobId: null,
     jobOffsetSeen: 0,
     dirty: {},
@@ -34,6 +39,7 @@
     { id: "logs", icon: "≡", label: "运行日志", title: "运行日志", sub: "实时查看各服务日志" },
     { id: "activity", icon: "☰", label: "任务记录", title: "任务记录", sub: "最近领取与交付的任务", role: "worker" },
     { id: "passwords", icon: "⚿", label: "解压密码", title: "解压密码字典", sub: "加密压缩包的候选密码，可增删改", role: "worker" },
+    { id: "fleet", icon: "☷", label: "节点管理", title: "节点管理", sub: "统一查看和控制所有 Worker 服务器", role: "gateway" },
     { id: "maintenance", icon: "⛭", label: "维护", title: "维护", sub: "依赖修复、证书、更新与备份" },
     { id: "account", icon: "⚿", label: "管理账号", title: "管理账号", sub: "修改面板登录用户名与密码" },
   ];
@@ -246,6 +252,8 @@
     if (id === "logs") loadLogs();
     if (id === "activity") loadActivity();
     if (id === "passwords" && !state.passwords) loadPasswords();
+    if (id === "fleet") loadFleet();
+    if (id === "maintenance" && !state.joinCode) loadJoinCode();
   }
 
   // ------------------------------------------------------------- polling
@@ -256,6 +264,7 @@
       refresh(false);
       if (state.view === "logs" && state.logFollow) loadLogs();
       if (state.view === "baidu") loadBaidu();
+      if (state.view === "fleet") loadFleet(true);
       if (state.jobId) pollJob();
     }, 5000);
   }
@@ -298,6 +307,7 @@
       case "logs": html = viewLogs(); break;
       case "activity": html = viewActivity(); break;
       case "passwords": html = viewPasswords(); break;
+      case "fleet": html = viewFleet(); break;
       case "maintenance": html = viewMaintenance(); break;
       case "account": html = viewAccount(); break;
       default: html = viewOverview();
@@ -845,6 +855,211 @@
     }).catch(function (exc) { toast(exc.message, "bad"); });
   }
 
+  // --------------------------------------------------------------- fleet
+  function viewFleet() {
+    var fleet = state.fleet;
+    if (!fleet) return '<div class="card">正在读取节点状态…</div>';
+    var summary = fleet.summary || {};
+
+    var tiles = '<div class="grid cols-4">'
+      + stat("节点总数", summary.nodes_total || 1, (summary.nodes_offline || 0) + " 个离线")
+      + stat("运行中 Worker", (summary.workers_running || 0) + " / " + (summary.workers_total || 0), "越多产能越高")
+      + stat("运行中网关", summary.gateways_running || 0, "通常只需要 1 个")
+      + stat("待处理问题", summary.issues || 0, summary.issues ? "有节点配置不完整" : "全部节点配置完整")
+      + "</div>";
+
+    var all = [fleet.local].concat(fleet.nodes || []);
+    var cards = all.map(nodeCard).join("");
+
+    var addCard = '<div class="card"><div class="card-head"><div><h3>添加 Worker 节点</h3>'
+      + "<p>在目标 Worker 的面板里打开「维护 → 接入主服务器」，复制那串接入码粘贴到这里即可。"
+      + "接入码里已经包含地址、证书指纹和令牌，不需要再手工配置任何东西。</p></div>"
+      + '<div class="card-actions"><button class="btn small ghost" data-action="fleet-refresh">立即刷新</button></div></div>'
+      + '<div class="input-row"><input type="text" id="join-code" placeholder="粘贴 AUTOBOOK1:… 开头的接入码" spellcheck="false" autocomplete="off">'
+      + '<input type="text" id="join-name" placeholder="备注名（可选）" autocomplete="off">'
+      + '<button class="btn primary" data-action="fleet-add">添加节点</button></div></div>';
+
+    return tiles + addCard + cards + fleetPushCard() + fleetDetailCard();
+  }
+
+  function nodeCard(node) {
+    if (!node) return "";
+    var isLocal = !!node.local;
+    var offline = node.online === false;
+    var pill = isLocal
+      ? '<span class="pill info">本机</span>'
+      : (offline ? '<span class="pill bad"><span class="dot"></span>离线</span>'
+                 : '<span class="pill ok"><span class="dot live"></span>在线</span>');
+    var system = node.system || {};
+    var memory = system.memory || {};
+    var disk = system.disk || {};
+    var meta = "";
+    if (!offline && system.hostname) {
+      meta = '<div class="service-meta">'
+        + "<span>" + esc(system.hostname) + "</span>"
+        + "<span>" + (system.cpu_count || 1) + " 核 · 负载 " + ((system.load || [0])[0]) + "</span>"
+        + "<span>内存 " + bytes(memory.used) + " / " + bytes(memory.total) + "</span>"
+        + "<span>磁盘剩余 " + bytes(disk.free) + "</span>"
+        + (node.version ? "<span>面板 " + esc(node.version) + "</span>" : "")
+        + (node.container ? "<span>Docker</span>" : "")
+        + "</div>";
+    }
+
+    var services = (node.services || []).filter(function (service) {
+      return service.name !== "admin" && service.installed;
+    }).map(function (service) {
+      var running = service.running;
+      var buttons = isLocal
+        ? '<button class="btn small ghost" data-action="service" data-service="' + service.name
+          + '" data-op="' + (running ? "restart" : "start") + '">' + (running ? "重启" : "启动") + "</button>"
+          + (running ? '<button class="btn small danger" data-action="service" data-service="' + service.name + '" data-op="stop">停止</button>' : "")
+        : '<button class="btn small ghost" data-action="fleet-service" data-id="' + esc(node.id)
+          + '" data-service="' + service.name + '" data-op="' + (running ? "restart" : "start") + '">'
+          + (running ? "重启" : "启动") + "</button>"
+          + (running ? '<button class="btn small danger" data-action="fleet-service" data-id="' + esc(node.id)
+              + '" data-service="' + service.name + '" data-op="stop">停止</button>' : "");
+      return '<div class="node-service">'
+        + '<span class="pill ' + (running ? "ok" : "bad") + '"><span class="dot ' + (running ? "live" : "") + '"></span>'
+        + esc(service.label) + "</span>"
+        + (running && service.uptime_seconds ? '<span class="node-service-meta">已运行 ' + duration(service.uptime_seconds) + "</span>" : "")
+        + (running && service.memory_bytes ? '<span class="node-service-meta">' + bytes(service.memory_bytes) + "</span>" : "")
+        + '<span class="node-service-actions">' + buttons + "</span></div>";
+    }).join("");
+
+    var issues = "";
+    var issueMap = node.issues || {};
+    Object.keys(issueMap).forEach(function (role) {
+      issueMap[role].forEach(function (issue) {
+        issues += "<li>" + esc(issue.message) + "</li>";
+      });
+    });
+
+    var actions = isLocal
+      ? '<button class="btn small ghost" data-view="activity">任务记录</button>'
+        + '<button class="btn small ghost" data-view="logs">日志</button>'
+        + '<button class="btn small ghost" data-view="checks">连通性检测</button>'
+      : '<button class="btn small ghost" data-action="fleet-activity" data-id="' + esc(node.id) + '">任务记录</button>'
+        + '<button class="btn small ghost" data-action="fleet-logs" data-id="' + esc(node.id) + '">日志</button>'
+        + '<button class="btn small ghost" data-action="fleet-check" data-id="' + esc(node.id) + '">连通性检测</button>'
+        + '<a class="btn small ghost" href="' + esc(node.url) + '" target="_blank" rel="noreferrer noopener">打开面板</a>'
+        + '<button class="btn small ghost" data-action="fleet-rename" data-id="' + esc(node.id) + '">重命名</button>'
+        + '<button class="btn small ghost" data-action="fleet-remove" data-id="' + esc(node.id) + '">移除</button>';
+
+    var busy = state.fleetBusy[node.id];
+    return '<div class="card node-card"><div class="card-head"><div>'
+      + "<h3>" + esc(node.name) + "</h3>"
+      + "<p>" + (node.url ? esc(node.url) : "本机面板")
+      + (node.role ? " · " + esc({ all: "网关 + Worker", gateway: "仅网关", worker: "仅 Worker" }[node.role] || node.role) : "")
+      + "</p></div>"
+      + '<div class="card-actions">' + pill
+      + (node.issue_count ? '<span class="pill bad">' + node.issue_count + " 项待办</span>" : "")
+      + (busy ? '<span class="pill info">操作中…</span>' : "")
+      + "</div></div>"
+      + (offline ? '<div class="banner bad"><span>✕</span><div>' + esc(node.error || "无法连接")
+          + "</div></div>" : meta + (services || '<div class="empty-state">该节点没有可管理的服务。</div>'))
+      + (issues ? '<ul class="issue-list">' + issues + "</ul>" : "")
+      + '<div class="service-actions">' + actions + "</div></div>";
+  }
+
+  function fleetPushCard() {
+    var fleet = state.fleet;
+    var remote = fleet.nodes || [];
+    if (!remote.length) return "";
+    var options = remote.map(function (node) {
+      var checked = state.fleetSelection.indexOf(node.id) !== -1;
+      return '<label class="checkline"><input type="checkbox" data-action="fleet-select" data-id="'
+        + esc(node.id) + '"' + (checked ? " checked" : "") + "> " + esc(node.name) + "</label>";
+    }).join("");
+    var groups = (fleet.push_groups || []).map(function (group) {
+      return '<label class="checkline"><input type="checkbox" class="push-group" value="' + esc(group.id)
+        + '"> <strong>' + esc(group.label) + "</strong> — " + esc(group.hint) + "</label>";
+    }).join("");
+    return '<div class="card"><div class="card-head"><div><h3>配置下发</h3>'
+      + "<p>把本机的配置一次性推给选中的节点，省去逐台填写。网关一项还会自动把本机的"
+      + "网关地址（" + esc(fleet.gateway_url || "") + "）和证书装到对方，这是新增 Worker 最麻烦的一步。</p></div>"
+      + '<div class="card-actions"><button class="btn primary small" data-action="fleet-push">开始下发</button></div></div>'
+      + '<div class="grid cols-2"><div><h4 class="stat-label">选择节点</h4><div class="check-column">'
+      + options + '<div class="service-actions"><button class="btn small ghost" data-action="fleet-select-all">全选</button>'
+      + '<button class="btn small ghost" data-action="fleet-select-none">全不选</button></div></div></div>'
+      + '<div><h4 class="stat-label">选择下发内容</h4><div class="check-column">' + groups + "</div></div></div>"
+      + '<div class="banner warn"><span>⚠</span><div>下发会<strong>覆盖</strong>目标节点上对应的配置项，'
+      + "包含令牌和网盘密码。下发后目标节点需要重启 Worker 才会生效。</div></div></div>";
+  }
+
+  function fleetDetailCard() {
+    var detail = state.fleetDetail;
+    if (!detail) return "";
+    var title = { logs: "运行日志", activity: "任务记录", check: "连通性检测" }[detail.kind] || "详情";
+    var body;
+    if (detail.loading) {
+      body = '<div class="empty-state">正在读取…</div>';
+    } else if (detail.error) {
+      body = '<div class="banner bad"><span>✕</span><div>' + esc(detail.error) + "</div></div>";
+    } else if (detail.kind === "logs") {
+      body = '<pre class="console">' + esc(detail.data.text || "（暂无日志）") + "</pre>";
+    } else if (detail.kind === "activity") {
+      var rows = (detail.data.tasks || []).map(function (task) {
+        var badge = { completed: '<span class="pill ok">已完成</span>', failed: '<span class="pill bad">失败</span>' }[task.status]
+          || '<span class="pill info"><span class="dot live"></span>处理中</span>';
+        return "<tr><td>#" + esc(task.id) + "</td><td>" + esc(task.title || "-") + "</td><td>" + badge
+          + "</td><td>" + esc(task.message || "") + "</td><td>" + esc(task.updated || "") + "</td></tr>";
+      }).join("");
+      body = rows
+        ? '<div class="table-wrap"><table class="table"><thead><tr><th>任务</th><th>书名</th><th>状态</th><th>最新进度</th><th>时间</th></tr></thead><tbody>'
+          + rows + "</tbody></table></div>"
+        : '<div class="empty-state">该节点暂无任务记录。</div>';
+    } else {
+      body = (detail.data.results || []).map(function (item) {
+        var icon = { ok: "✓", fail: "✕", warn: "!", skip: "–" }[item.status] || "?";
+        return '<div class="check-item"><div class="check-icon ' + item.status + '">' + icon + "</div>"
+          + '<div class="check-body"><div class="check-title">' + esc(item.title) + "</div>"
+          + (item.detail ? '<div class="check-detail">' + esc(item.detail) + "</div>" : "")
+          + (item.hint ? '<div class="check-hint">建议：' + esc(item.hint) + "</div>" : "")
+          + "</div></div>";
+      }).join("");
+    }
+    return '<div class="card"><div class="card-head"><div><h3>' + esc(detail.name) + " — " + title + "</h3></div>"
+      + '<div class="card-actions">'
+      + (detail.kind === "logs" ? '<button class="btn small ghost" data-action="fleet-logs" data-id="' + esc(detail.id) + '">刷新</button>' : "")
+      + '<button class="btn small ghost" data-action="fleet-detail-close">关闭</button></div></div>' + body + "</div>";
+  }
+
+  function loadFleet(quiet) {
+    return api("/api/fleet").then(function (fleet) {
+      state.fleet = fleet;
+      if (state.view === "fleet") render();
+    }).catch(function (exc) {
+      if (!quiet) toast(exc.message, "bad");
+    });
+  }
+
+  function loadJoinCode() {
+    return api("/api/node/join").then(function (result) {
+      state.joinCode = result;
+      if (state.view === "maintenance") render();
+    }).catch(function () {});
+  }
+
+  function fleetNodeName(id) {
+    var all = [state.fleet.local].concat(state.fleet.nodes || []);
+    for (var i = 0; i < all.length; i += 1) {
+      if (all[i] && all[i].id === id) return all[i].name;
+    }
+    return id;
+  }
+
+  function openFleetDetail(id, kind, request) {
+    state.fleetDetail = { id: id, kind: kind, name: fleetNodeName(id), loading: true };
+    render();
+    request.then(function (data) {
+      state.fleetDetail = { id: id, kind: kind, name: fleetNodeName(id), data: data };
+    }).catch(function (exc) {
+      state.fleetDetail = { id: id, kind: kind, name: fleetNodeName(id), error: exc.message };
+    }).finally(function () {
+      if (state.view === "fleet") render();
+    });
+  }
+
   // --------------------------------------------------------- maintenance
   function viewMaintenance() {
     var job = state.jobSnapshot;
@@ -864,7 +1079,18 @@
             + role + '"' + (state.session.role === role ? " disabled" : "") + ">切换为" + label + "</button>";
         }).join("") + "</div></div>";
 
-    return '<div class="card"><div class="card-head"><div><h3>一键维护</h3>'
+    var join = state.joinCode;
+    var joinCard = '<div class="card"><div class="card-head"><div><h3>接入主服务器</h3>'
+      + "<p>把下面这串接入码复制到主服务器的「节点管理」页，主服务器就能查看本机状态、"
+      + "任务记录和日志，并远程启停服务。接入码里包含本机地址、证书指纹和一个专用令牌，"
+      + "<strong>不包含</strong>管理员密码。</p></div>"
+      + '<div class="card-actions"><button class="btn small ghost" data-action="join-rotate">重新生成</button></div></div>'
+      + '<div class="copyable"><code id="join-code-value">' + esc(join ? join.code : "读取中…") + "</code>"
+      + '<button class="btn small primary" data-action="join-copy">复制</button></div>'
+      + (join ? '<p class="stat-sub">本机地址 ' + esc(join.url) + ' · 证书指纹 ' + esc(join.fingerprint.slice(0, 24)) + "…</p>" : "")
+      + '<p class="stat-sub">重新生成会让已经登记本机的主服务器立即失效，需要重新粘贴新的接入码。</p></div>';
+
+    return joinCard + '<div class="card"><div class="card-head"><div><h3>一键维护</h3>'
       + "<p>常见问题都可以在这里一键处理，执行过程会实时显示在下方控制台。</p></div></div>"
       + '<div class="grid cols-2">'
       + maintenanceItem("dependencies", "修复系统依赖", "重新安装 7z、aria2、openssl 等外部命令。缺少命令导致解压或下载失败时使用。")
@@ -1041,6 +1267,112 @@
       render();
     } else if (action === "password-save-bulk") {
       passwordAction({ action: "replace", content: $("password-bulk").value });
+    } else if (action === "join-copy") {
+      var codeNode = $("join-code-value");
+      copyText(codeNode ? codeNode.textContent : "")
+        .then(function () { toast("接入码已复制", "ok"); })
+        .catch(function () { toast("请手动选中接入码复制", "warn"); });
+    } else if (action === "join-rotate") {
+      confirmDialog("重新生成接入码",
+        "已经登记本机的主服务器会立即失去连接，需要重新粘贴新的接入码。", "重新生成")
+        .then(function (confirmed) {
+          if (!confirmed) return;
+          api("/api/node/token", { method: "POST" }).then(function (result) {
+            state.joinCode = result;
+            toast(result.message, "ok");
+            render();
+          }).catch(function (exc) { toast(exc.message, "bad"); });
+        });
+    } else if (action === "fleet-refresh") {
+      api("/api/fleet/refresh", { method: "POST" }).then(function () {
+        toast("已刷新全部节点", "ok");
+        return loadFleet();
+      }).catch(function (exc) { toast(exc.message, "bad"); });
+    } else if (action === "fleet-add") {
+      var codeInput = $("join-code");
+      var nameInput = $("join-name");
+      if (!codeInput || !codeInput.value.trim()) { toast("请先粘贴接入码", "warn"); return; }
+      api("/api/fleet/add", {
+        method: "POST",
+        body: { code: codeInput.value.trim(), name: nameInput ? nameInput.value.trim() : "" },
+      }).then(function (result) {
+        toast(result.message, "ok");
+        return loadFleet();
+      }).catch(function (exc) { toast(exc.message, "bad"); });
+    } else if (action === "fleet-remove") {
+      var removeId = node.getAttribute("data-id");
+      confirmDialog("移除节点",
+        "只是从本机的列表里移除 <strong>" + esc(fleetNodeName(removeId))
+        + "</strong>，不会停止或卸载对方的服务。", "移除")
+        .then(function (confirmed) {
+          if (!confirmed) return;
+          api("/api/fleet/remove", { method: "POST", body: { id: removeId } })
+            .then(function (result) { toast(result.message, "ok"); return loadFleet(); })
+            .catch(function (exc) { toast(exc.message, "bad"); });
+        });
+    } else if (action === "fleet-rename") {
+      var renameId = node.getAttribute("data-id");
+      var proposed = window.prompt("新的节点名称", fleetNodeName(renameId));
+      if (proposed === null) return;
+      api("/api/fleet/rename", { method: "POST", body: { id: renameId, name: proposed } })
+        .then(function (result) { toast(result.message, "ok"); return loadFleet(); })
+        .catch(function (exc) { toast(exc.message, "bad"); });
+    } else if (action === "fleet-service") {
+      var serviceId = node.getAttribute("data-id");
+      var op = node.getAttribute("data-op");
+      state.fleetBusy[serviceId] = true;
+      render();
+      api("/api/fleet/service", {
+        method: "POST",
+        body: { id: serviceId, service: node.getAttribute("data-service"), action: op },
+      }).then(function (result) {
+        toast(fleetNodeName(serviceId) + "：" + (result.message || "操作成功"), "ok");
+      }).catch(function (exc) {
+        toast(fleetNodeName(serviceId) + "：" + exc.message, "bad");
+      }).finally(function () {
+        delete state.fleetBusy[serviceId];
+        loadFleet();
+      });
+    } else if (action === "fleet-logs") {
+      var logId = node.getAttribute("data-id");
+      openFleetDetail(logId, "logs", api("/api/fleet/logs?id=" + encodeURIComponent(logId) + "&service=worker&lines=300"));
+    } else if (action === "fleet-activity") {
+      var actId = node.getAttribute("data-id");
+      openFleetDetail(actId, "activity", api("/api/fleet/activity?id=" + encodeURIComponent(actId)));
+    } else if (action === "fleet-check") {
+      var checkId = node.getAttribute("data-id");
+      openFleetDetail(checkId, "check",
+        api("/api/fleet/check", { method: "POST", body: { id: checkId, role: "worker" } }));
+    } else if (action === "fleet-detail-close") {
+      state.fleetDetail = null;
+      render();
+    } else if (action === "fleet-select-all") {
+      state.fleetSelection = (state.fleet.nodes || []).map(function (item) { return item.id; });
+      render();
+    } else if (action === "fleet-select-none") {
+      state.fleetSelection = [];
+      render();
+    } else if (action === "fleet-push") {
+      var groups = [].slice.call(document.querySelectorAll(".push-group:checked")).map(function (box) {
+        return box.value;
+      });
+      if (!state.fleetSelection.length) { toast("请先勾选要下发的节点", "warn"); return; }
+      if (!groups.length) { toast("请先勾选要下发的内容", "warn"); return; }
+      confirmDialog("确认下发配置",
+        "将向 <strong>" + state.fleetSelection.length + "</strong> 个节点下发 <strong>"
+        + groups.length + "</strong> 组配置，目标节点上对应的配置会被覆盖。", "下发")
+        .then(function (confirmed) {
+          if (!confirmed) return;
+          api("/api/fleet/push", { method: "POST", body: { ids: state.fleetSelection, groups: groups } })
+            .then(function (result) {
+              toast(result.message, result.ok ? "ok" : "warn");
+              (result.results || []).forEach(function (item) {
+                if (!item.ok) toast((item.name || item.id) + "：" + item.message, "bad");
+              });
+              return loadFleet();
+            })
+            .catch(function (exc) { toast(exc.message, "bad"); });
+        });
     } else if (action === "maintain") {
       doMaintenance(node.getAttribute("data-op"));
     } else if (action === "switch-role") {
@@ -1070,6 +1402,13 @@
     var node = event.target.closest("[data-action]");
     if (!node) return;
     var action = node.getAttribute("data-action");
+    if (action === "fleet-select") {
+      var id = node.getAttribute("data-id");
+      var index = state.fleetSelection.indexOf(id);
+      if (node.checked && index === -1) state.fleetSelection.push(id);
+      if (!node.checked && index !== -1) state.fleetSelection.splice(index, 1);
+      return;
+    }
     if (action === "log-service") { state.logService = node.value; loadLogs(); }
     else if (action === "log-lines") { state.logLines = Number(node.value); loadLogs(); }
     else if (action === "log-follow") { state.logFollow = node.checked; }

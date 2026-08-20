@@ -5,6 +5,7 @@ import hmac
 import json
 import logging
 import mimetypes
+import shutil
 import ssl
 import time
 from http import HTTPStatus
@@ -12,16 +13,19 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from autobook_linux.panel import (
-    PANEL_VERSION, diagnostics, maintenance, passwords as password_dict, schema, services, sysinfo,
+    PANEL_VERSION, diagnostics, maintenance, nodes, passwords as password_dict, schema, services,
+    sysinfo,
 )
 from autobook_linux.panel.auth import LoginLimiter, PasswordStore, SessionStore
 from autobook_linux.panel.baidu import QrLoginManager
 from autobook_linux.panel.envfile import read_env_file, write_env_file
 from autobook_linux.panel.jobs import JobManager
-from autobook_linux.panel.settings import PanelSettings, in_container, supervisor_backend
+from autobook_linux.panel.settings import (
+    PanelSettings, in_container, service_user, supervisor_backend,
+)
 
 LOGGER = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -40,6 +44,32 @@ SECURITY_HEADERS = {
 }
 
 
+# Config groups the main server can push to its worker nodes in one click.
+PUSH_GROUPS: dict[str, dict[str, object]] = {
+    "site": {
+        "label": "任务网站",
+        "keys": ["SITE_BASE_URL", "WORKER_TOKEN"],
+        "hint": "网站地址与 Worker 令牌",
+    },
+    "drive": {
+        "label": "结果网盘",
+        "keys": ["DRIVE_BASE_URL", "DRIVE_EMAIL", "DRIVE_PASSWORD", "DRIVE_TARGET_DIR",
+                 "DRIVE_EXPIRE_DAYS"],
+        "hint": "Cloudreve 账号与上传目录",
+    },
+    "gateway": {
+        "label": "下载网关",
+        "keys": ["BAIDU_GATEWAY_TOKEN"],
+        "hint": "共享令牌、本机网关地址与证书",
+    },
+    "passwords": {
+        "label": "解压密码字典",
+        "keys": [],
+        "hint": "把本机的密码字典完整同步过去",
+    },
+}
+
+
 class PanelError(Exception):
     """User-facing error carrying an HTTP status."""
 
@@ -54,6 +84,9 @@ def make_handler(settings: PanelSettings) -> type[BaseHTTPRequestHandler]:
     limiter = LoginLimiter()
     qr_login = QrLoginManager(settings)
     jobs = JobManager()
+    node_tokens = nodes.NodeTokenStore(settings.config_dir / nodes.NODE_TOKEN_FILE)
+    registry = nodes.NodeRegistry(settings.config_dir / nodes.NODES_FILE)
+    nodes.NodePoller(registry).start()
 
     def load_values(target: str) -> dict[str, str]:
         return schema.apply_defaults(read_env_file(settings.env_path(target)), target)
@@ -136,6 +169,16 @@ def make_handler(settings: PanelSettings) -> type[BaseHTTPRequestHandler]:
                 raise PanelError("请先登录", 401)
             return session
 
+        def _bearer(self) -> str:
+            header = self.headers.get("Authorization", "")
+            return header[7:].strip() if header.startswith("Bearer ") else ""
+
+        def _peer_allowed(self, path: str, method: str) -> bool:
+            """A managing panel may reach a fixed subset with its node token."""
+            allowed = nodes.NODE_TOKEN_GET if method == "GET" else nodes.NODE_TOKEN_POST
+            token = self._bearer()
+            return bool(token) and path in allowed and node_tokens.matches(token)
+
         def _require_csrf(self, session: dict[str, Any]) -> None:
             supplied = self.headers.get("X-CSRF-Token", "")
             if not supplied or not hmac.compare_digest(supplied, str(session["csrf"])):
@@ -217,6 +260,9 @@ def make_handler(settings: PanelSettings) -> type[BaseHTTPRequestHandler]:
                     }
                 )
                 return
+            if not self._session() and self._peer_allowed(path, "GET"):
+                self._peer_get(path)
+                return
             session = self._require()
             if path == "/api/overview":
                 self._json(self._overview())
@@ -261,6 +307,20 @@ def make_handler(settings: PanelSettings) -> type[BaseHTTPRequestHandler]:
                 if not job:
                     raise PanelError("任务不存在", 404)
                 self._json(job.snapshot(int(self._query().get("offset", "0") or 0)))
+            elif path == "/api/node/join":
+                self._json(self._join_code())
+            elif path == "/api/fleet":
+                self._json(self._fleet())
+            elif path == "/api/fleet/logs":
+                query = self._query()
+                self._json(registry.client(query.get("id", "")).request(
+                    "GET",
+                    f"/api/logs?service={quote(query.get('service', 'worker'))}"
+                    f"&lines={int(query.get('lines', '200') or 200)}"
+                    f"&grep={quote(query.get('grep', '')[:80])}",
+                ))
+            elif path == "/api/fleet/activity":
+                self._json(registry.client(self._query().get("id", "")).request("GET", "/api/activity"))
             else:
                 raise PanelError("未找到", 404)
             _ = session
@@ -269,6 +329,9 @@ def make_handler(settings: PanelSettings) -> type[BaseHTTPRequestHandler]:
         def _api_post(self, path: str) -> None:
             if path == "/api/login":
                 self._login()
+                return
+            if not self._session() and self._peer_allowed(path, "POST"):
+                self._peer_post(path, self._body())
                 return
             session = self._require()
             self._require_csrf(session)
@@ -308,10 +371,222 @@ def make_handler(settings: PanelSettings) -> type[BaseHTTPRequestHandler]:
                            cookie=self._cookie("", clear=True))
             elif path == "/api/maintenance":
                 self._json(self._maintenance(payload))
+            elif path == "/api/node/token":
+                node_tokens.rotate()
+                self._json({"ok": True, "message": "已生成新的接入令牌，旧接入码立即失效",
+                            **self._join_code()})
+            elif path == "/api/fleet/add":
+                node = registry.add(str(payload.get("code", "")), str(payload.get("name", "")))
+                status = registry.poll(node.id)
+                self._json({"ok": True, "node": node.public(), "status": status,
+                            "message": f"已添加节点 {node.name}"})
+            elif path == "/api/fleet/remove":
+                registry.remove(str(payload.get("id", "")))
+                self._json({"ok": True, "message": "节点已移除"})
+            elif path == "/api/fleet/rename":
+                registry.rename(str(payload.get("id", "")), str(payload.get("name", "")))
+                self._json({"ok": True, "message": "节点名称已更新"})
+            elif path == "/api/fleet/refresh":
+                self._json({"ok": True, "nodes": registry.poll_all()})
+            elif path == "/api/fleet/service":
+                self._json(self._fleet_service(payload))
+            elif path == "/api/fleet/check":
+                node_id = str(payload.get("id", ""))
+                self._json(registry.client(node_id).request(
+                    "POST", "/api/check", {"role": str(payload.get("role", "worker"))}))
+            elif path == "/api/fleet/push":
+                self._json(self._fleet_push(payload))
+            elif path == "/api/gateway-cert":
+                self._json(self._receive_gateway_cert(payload))
             else:
                 raise PanelError("未找到", 404)
 
         # ---------------------------------------------------------- handlers
+        def _peer_get(self, path: str) -> None:
+            """Serve a managing panel's read-only request."""
+            if path == "/api/overview":
+                payload = self._overview()
+                payload["container"] = in_container()
+                self._json(payload)
+            elif path == "/api/activity":
+                self._json({"tasks": maintenance.worker_activity()})
+            elif path == "/api/logs":
+                query = self._query()
+                name = query.get("service", "worker")
+                if name not in services.SERVICES:
+                    raise PanelError("未知服务")
+                self._json({"service": name, "text": services.logs(
+                    name, int(query.get("lines", "200") or 200),
+                    query.get("priority", ""), query.get("grep", "")[:80])})
+            elif path == "/api/config":
+                self._json(self._config_payload())
+            elif path == "/api/passwords":
+                self._json(password_dict.snapshot(settings))
+            else:
+                raise PanelError("未找到", 404)
+
+        def _peer_post(self, path: str, payload: dict[str, Any]) -> None:
+            """Serve a managing panel's control request."""
+            if path == "/api/service":
+                self._json(self._service(payload))
+            elif path == "/api/check":
+                role = str(payload.get("role", "")).strip()
+                if role not in settings.roles():
+                    raise PanelError("本机未安装该角色")
+                self._json({"role": role,
+                            "results": diagnostics.run_checks(role, role_values(role), settings.install_dir)})
+            elif path == "/api/config":
+                self._json(self._save_config(payload))
+            elif path == "/api/passwords":
+                self._json(self._passwords(payload))
+            elif path == "/api/gateway-cert":
+                self._json(self._receive_gateway_cert(payload))
+            else:
+                raise PanelError("未找到", 404)
+
+        # ------------------------------------------------------------ fleet
+        def _join_code(self) -> dict[str, Any]:
+            """Everything another panel needs to manage this one, in one string."""
+            try:
+                fingerprint = nodes.certificate_fingerprint(settings.tls_cert)
+            except OSError as exc:
+                raise PanelError(f"读取本机证书失败: {exc}", 500)
+            host = settings.public_host or "127.0.0.1"
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            url = f"https://{host}:{settings.port}"
+            name = f"{sysinfo.snapshot(settings.install_dir)['hostname']} ({settings.current_role()})"
+            return {
+                "code": nodes.make_join_code(name, url, fingerprint, node_tokens.get()),
+                "url": url,
+                "fingerprint": fingerprint,
+                "name": name,
+            }
+
+        def _local_status(self) -> dict[str, Any]:
+            overview = self._overview()
+            return {
+                "id": "local", "name": "本机（主服务器）", "url": "", "online": True, "error": "",
+                "role": overview["role"], "version": overview["version"],
+                "services": overview["services"], "issues": overview["issues"],
+                "issue_count": sum(len(items) for items in overview["issues"].values()),
+                "system": overview["system"], "container": in_container(),
+                "checked_at": time.time(), "local": True,
+            }
+
+        def _fleet(self) -> dict[str, Any]:
+            local = self._local_status()
+            remote = registry.all_status()
+            return {
+                "local": local,
+                "nodes": remote,
+                "summary": nodes.summarise(local, remote),
+                "push_groups": [
+                    {"id": key, "label": value["label"], "hint": value["hint"]}
+                    for key, value in PUSH_GROUPS.items()
+                ],
+                "gateway_url": self._public_gateway_url(),
+            }
+
+        def _public_gateway_url(self) -> str:
+            values = read_env_file(settings.gateway_env)
+            port = values.get("GATEWAY_PORT") or "8765"
+            host = settings.public_host or "127.0.0.1"
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            return f"https://{host}:{port}"
+
+        def _fleet_service(self, payload: dict[str, Any]) -> dict[str, Any]:
+            node_id = str(payload.get("id", ""))
+            body = {
+                "service": str(payload.get("service", "")),
+                "action": str(payload.get("action", "")),
+                "force": bool(payload.get("force")),
+            }
+            result = registry.client(node_id).request("POST", "/api/service", body)
+            registry.poll(node_id)
+            return result
+
+        def _fleet_push(self, payload: dict[str, Any]) -> dict[str, Any]:
+            node_ids = [str(item) for item in (payload.get("ids") or [])]
+            groups = [str(item) for item in (payload.get("groups") or [])]
+            if not node_ids:
+                raise PanelError("请先选择要下发的节点")
+            unknown = [name for name in groups if name not in PUSH_GROUPS]
+            if unknown or not groups:
+                raise PanelError("请选择有效的下发内容")
+
+            local_worker = role_values("worker") if settings.has_role("worker") else load_values("worker")
+            local_gateway = role_values("gateway") if settings.has_role("gateway") else {}
+            values: dict[str, str] = {}
+            for group in groups:
+                for key in PUSH_GROUPS[group]["keys"]:
+                    source = local_gateway if key in local_gateway and local_gateway.get(key) else local_worker
+                    if source.get(key):
+                        values[key] = source[key]
+            if "gateway" in groups:
+                values["BAIDU_GATEWAY_URL"] = self._public_gateway_url()
+
+            certificate = ""
+            if "gateway" in groups:
+                cert_path = Path(local_gateway.get("GATEWAY_TLS_CERT", ""))
+                if cert_path.is_file():
+                    certificate = cert_path.read_text(encoding="utf-8")
+            dictionary = password_dict.load(settings) if "passwords" in groups else None
+
+            results = []
+            for node_id in node_ids:
+                entry: dict[str, Any] = {"id": node_id}
+                try:
+                    node = registry.get(node_id)
+                    client = registry.client(node_id)
+                    entry["name"] = node.name
+                    if certificate:
+                        client.request("POST", "/api/gateway-cert", {"pem": certificate})
+                    if values:
+                        client.request("POST", "/api/config", {"values": values})
+                    if dictionary is not None:
+                        client.request("POST", "/api/passwords",
+                                       {"action": "replace", "content": dictionary})
+                    entry.update({"ok": True, "message": "下发成功"})
+                except nodes.NodeError as exc:
+                    entry.update({"ok": False, "message": str(exc)})
+                except Exception as exc:  # pragma: no cover - defensive
+                    entry.update({"ok": False, "message": f"{type(exc).__name__}: {exc}"})
+                results.append(entry)
+            ok = sum(1 for item in results if item.get("ok"))
+            registry.poll_all()
+            return {
+                "ok": ok == len(results),
+                "results": results,
+                "message": f"{ok}/{len(results)} 个节点下发成功",
+            }
+
+        def _receive_gateway_cert(self, payload: dict[str, Any]) -> dict[str, Any]:
+            """Store a gateway certificate pushed by the managing panel."""
+            pem = str(payload.get("pem", "")).strip()
+            if "BEGIN CERTIFICATE" not in pem or len(pem) > 64 * 1024:
+                raise PanelError("证书内容无效")
+            try:
+                ssl.PEM_cert_to_DER_cert(pem if pem.endswith("\n") else pem + "\n")
+            except ValueError as exc:
+                raise PanelError(f"证书解析失败: {exc}")
+            target = settings.install_dir / "runtime" / "gateway.crt"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(pem + ("" if pem.endswith("\n") else "\n"), encoding="utf-8")
+            target.chmod(0o644)
+            owner = service_user()
+            if owner:
+                try:
+                    shutil.chown(target, user=owner, group=owner)
+                except (LookupError, PermissionError, OSError):
+                    pass
+            worker = read_env_file(settings.worker_env)
+            worker["BAIDU_GATEWAY_CA_FILE"] = str(target)
+            schema.apply_defaults(worker, "worker")
+            write_env_file(settings.worker_env, worker, schema.key_order("worker"))
+            return {"ok": True, "path": str(target), "message": "网关证书已更新"}
+
         def _login(self) -> None:
             address = self.client_address[0]
             if not limiter.allowed(address):
