@@ -26,7 +26,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         p7zip-full \
-        p7zip-rar \
         aria2 \
         openssl \
         ca-certificates \

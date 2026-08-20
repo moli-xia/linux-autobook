@@ -295,7 +295,10 @@ fi
 install -d -m 750 -o autobook -g autobook "$INSTALL_DIR/runtime"
 install -d -m 750 -o root -g autobook "$CONFIG_DIR"
 if [[ ! -f "$INSTALL_DIR/password.txt" ]]; then
-  install -m 600 -o autobook -g autobook "$INSTALL_DIR/password.example.txt" "$INSTALL_DIR/password.txt"
+  # Seed from the dictionary shipped with the panel; it is editable in the UI.
+  SEED="$INSTALL_DIR/autobook_linux/panel/data/default_passwords.txt"
+  [[ -f "$SEED" ]] || SEED="$INSTALL_DIR/password.example.txt"
+  install -m 600 -o autobook -g autobook "$SEED" "$INSTALL_DIR/password.txt"
 else
   chown autobook:autobook "$INSTALL_DIR/password.txt"
   chmod 600 "$INSTALL_DIR/password.txt"
