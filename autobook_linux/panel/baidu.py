@@ -9,9 +9,7 @@ import time
 from pathlib import Path
 
 from autobook_linux.panel.envfile import read_env_file
-from autobook_linux.panel.settings import PanelSettings
-
-SERVICE_USER = "autobook"
+from autobook_linux.panel.settings import PanelSettings, service_user
 
 PHASES = (
     ("扫码登录成功", "success", "登录成功，凭据已保存"),
@@ -56,11 +54,12 @@ class QrLoginManager:
                 "--qr-output",
                 str(self.qr_path),
             ]
+            owner = service_user()
             runuser = shutil.which("runuser")
-            if os.name != "nt" and os.geteuid() == 0 and runuser:
+            if owner and os.name != "nt" and os.geteuid() == 0 and runuser:
                 # The credential file must belong to the service account,
                 # otherwise the gateway cannot read its own 0600 secret.
-                command = [runuser, "--user", SERVICE_USER, "--preserve-environment", "--", *command]
+                command = [runuser, "--user", owner, "--preserve-environment", "--", *command]
             self.process = subprocess.Popen(
                 command,
                 cwd=str(self.settings.install_dir),
@@ -96,7 +95,13 @@ class QrLoginManager:
                 self.phase = "failed"
                 self.message = f"扫码登录失败（退出码 {code}），请查看下方日志"
         if code == 0:
-            subprocess.run(["systemctl", "restart", "autobook-gateway.service"], capture_output=True, timeout=90)
+            try:
+                from autobook_linux.panel import services
+
+                if services.status("gateway")["running"]:
+                    services.control("gateway", "restart")
+            except Exception:
+                pass
             with self._lock:
                 self.message = "扫码登录成功，网关服务已重启"
 

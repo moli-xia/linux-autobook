@@ -14,12 +14,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from autobook_linux.panel import PANEL_VERSION, diagnostics, maintenance, schema, services, sysinfo
+from autobook_linux.panel import (
+    PANEL_VERSION, diagnostics, maintenance, passwords as password_dict, schema, services, sysinfo,
+)
 from autobook_linux.panel.auth import LoginLimiter, PasswordStore, SessionStore
 from autobook_linux.panel.baidu import QrLoginManager
 from autobook_linux.panel.envfile import read_env_file, write_env_file
 from autobook_linux.panel.jobs import JobManager
-from autobook_linux.panel.settings import PanelSettings
+from autobook_linux.panel.settings import PanelSettings, in_container, supervisor_backend
 
 LOGGER = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -175,6 +177,9 @@ def make_handler(settings: PanelSettings) -> type[BaseHTTPRequestHandler]:
                 self._api_post(path)
             except PanelError as exc:
                 self._error(str(exc), exc.status)
+            except (ValueError, RuntimeError) as exc:
+                # Domain errors already carry an operator-facing message.
+                self._error(str(exc), 400)
             except Exception as exc:  # pragma: no cover - defensive
                 LOGGER.exception("POST %s 失败", path)
                 self._error(f"操作失败: {exc}", 500)
@@ -207,6 +212,8 @@ def make_handler(settings: PanelSettings) -> type[BaseHTTPRequestHandler]:
                         "roles": settings.roles(),
                         "public_host": settings.public_host,
                         "panel_port": settings.port,
+                        "container": in_container(),
+                        "supervisor": supervisor_backend(),
                     }
                 )
                 return
@@ -246,7 +253,7 @@ def make_handler(settings: PanelSettings) -> type[BaseHTTPRequestHandler]:
                 values = role_values("gateway" if settings.has_role("gateway") else "worker")
                 self._json({"token": values.get("BAIDU_GATEWAY_TOKEN", "")})
             elif path == "/api/passwords":
-                self._json(maintenance.read_password_dict(settings))
+                self._json(password_dict.snapshot(settings))
             elif path == "/api/jobs":
                 self._json({"jobs": jobs.recent()})
             elif path.startswith("/api/jobs/"):
@@ -293,8 +300,7 @@ def make_handler(settings: PanelSettings) -> type[BaseHTTPRequestHandler]:
                 qr_login.cancel()
                 self._json({"ok": True})
             elif path == "/api/passwords":
-                count = maintenance.write_password_dict(settings, str(payload.get("content", "")))
-                self._json({"ok": True, "count": count, "message": f"已保存 {count} 个候选密码"})
+                self._json(self._passwords(payload))
             elif path == "/api/account":
                 self._change_account(payload)
                 sessions.clear()
@@ -334,7 +340,7 @@ def make_handler(settings: PanelSettings) -> type[BaseHTTPRequestHandler]:
             roles = settings.roles()
             service_names = [name for name, meta in services.SERVICES.items()
                              if meta["role"] in roles or name == "admin"]
-            service_states = [services.status(name) for name in service_names]
+            service_states = [services.status(name, roles) for name in service_names]
             issues = {role: role_issues(role) for role in roles}
             worker_values = load_values("worker") if "worker" in roles else {}
             system = sysinfo.snapshot(settings.install_dir)
@@ -420,7 +426,7 @@ def make_handler(settings: PanelSettings) -> type[BaseHTTPRequestHandler]:
                 "issues": issues,
                 "restart_needed": [
                     name for name in roles
-                    if services.status(name)["running"]
+                    if services.status(name, roles)["running"]
                     and (name in affected or "both" in affected)
                 ],
                 "message": f"已保存 {len(set(changed))} 项修改" if changed else "配置无变化",
@@ -446,6 +452,34 @@ def make_handler(settings: PanelSettings) -> type[BaseHTTPRequestHandler]:
             output = services.control(name, action)
             return {"ok": True, "message": f"{services.SERVICES[name]['label']} 操作成功", "output": output}
 
+        def _passwords(self, payload: dict[str, Any]) -> dict[str, Any]:
+            action = str(payload.get("action", "replace"))
+            if action == "replace":
+                content = payload.get("content")
+                entries = (
+                    [str(item) for item in content] if isinstance(content, list)
+                    else str(content or "").splitlines()
+                )
+                count = password_dict.save(settings, entries)
+                message = f"已保存 {count} 条候选密码"
+            elif action == "add":
+                count, message = password_dict.add(settings, str(payload.get("value", "")))
+            elif action == "update":
+                count, message = password_dict.update(
+                    settings, str(payload.get("value", "")), str(payload.get("new_value", ""))
+                )
+            elif action == "delete":
+                count, message = password_dict.remove(settings, str(payload.get("value", "")))
+            elif action == "restore_defaults":
+                count, message = password_dict.restore_defaults(settings)
+            elif action == "merge_defaults":
+                count, message = password_dict.merge_defaults(settings)
+            else:
+                raise PanelError("未知的密码字典操作")
+            snapshot = password_dict.snapshot(settings)
+            snapshot.update({"ok": True, "count": count, "message": message})
+            return snapshot
+
         def _change_account(self, payload: dict[str, Any]) -> None:
             current = str(payload.get("current_password", ""))
             if not passwords.authenticate(passwords.username(), current):
@@ -470,7 +504,10 @@ def make_handler(settings: PanelSettings) -> type[BaseHTTPRequestHandler]:
             elif action == "update":
                 job = maintenance.update_application(settings, jobs)
             elif action == "role":
-                job = maintenance.switch_role(settings, jobs, str(payload.get("role", "")))
+                role = str(payload.get("role", ""))
+                if in_container():
+                    return {"ok": True, "message": maintenance.switch_role_in_container(settings, role)}
+                job = maintenance.switch_role(settings, jobs, role)
             elif action == "restart_panel":
                 maintenance.restart_panel()
                 return {"ok": True, "message": "面板将在数秒后重启"}

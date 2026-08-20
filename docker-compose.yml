@@ -1,0 +1,51 @@
+# linux-autobook — single-container deployment.
+#
+#   1. cp docker/.env.example .env   然后填写 AUTOBOOK_PUBLIC_HOST 等变量
+#   2. docker compose up -d
+#   3. 浏览器打开 https://<AUTOBOOK_PUBLIC_HOST>:8766/ ，默认账号密码 admin/admin
+#
+# 面板、百度下载网关和 Worker 都在这一个容器里，由面板内置的进程管理器托管，
+# 可以在网页上启停；配置与运行数据放在具名卷里，重建容器不会丢。
+services:
+  autobook:
+    image: ${AUTOBOOK_IMAGE:-moli-xia/linux-autobook:latest}
+    container_name: autobook
+    restart: unless-stopped
+    # The gateway and worker both need the host clock and outbound access only.
+    environment:
+      # all = 网关 + Worker（主服务器）；gateway = 仅网关；worker = 仅 Worker
+      AUTOBOOK_ROLE: ${AUTOBOOK_ROLE:-all}
+      # 公网 IP 或域名：写进自签名证书，也是面板显示的访问地址
+      AUTOBOOK_PUBLIC_HOST: ${AUTOBOOK_PUBLIC_HOST:?请在 .env 中设置服务器公网 IP 或域名}
+      ADMIN_PORT: ${ADMIN_PORT:-8766}
+      GATEWAY_PORT: ${GATEWAY_PORT:-8765}
+      TZ: ${TZ:-Asia/Shanghai}
+      # 下面这些只在第一次创建配置时使用，之后请在面板里改
+      AUTOBOOK_SITE_URL: ${AUTOBOOK_SITE_URL:-https://544544.xyz}
+      AUTOBOOK_WORKER_TOKEN: ${AUTOBOOK_WORKER_TOKEN:-}
+      AUTOBOOK_WORKER_ID: ${AUTOBOOK_WORKER_ID:-}
+      AUTOBOOK_CONCURRENCY: ${AUTOBOOK_CONCURRENCY:-2}
+      AUTOBOOK_DRIVE_URL: ${AUTOBOOK_DRIVE_URL:-https://drive.netupdown.com}
+      AUTOBOOK_DRIVE_EMAIL: ${AUTOBOOK_DRIVE_EMAIL:-}
+      AUTOBOOK_DRIVE_PASSWORD: ${AUTOBOOK_DRIVE_PASSWORD:-}
+      AUTOBOOK_GATEWAY_TOKEN: ${AUTOBOOK_GATEWAY_TOKEN:-}
+      AUTOBOOK_GATEWAY_URL: ${AUTOBOOK_GATEWAY_URL:-}
+      AUTOBOOK_GATEWAY_CA_FILE: ${AUTOBOOK_GATEWAY_CA_FILE:-}
+    ports:
+      - "${ADMIN_PORT:-8766}:8766"     # 管理面板 HTTPS
+      - "${GATEWAY_PORT:-8765}:8765"   # 下载网关，仅网关角色需要对外开放
+    volumes:
+      - autobook-config:/etc/linux-autobook
+      - autobook-runtime:/opt/autobook-linux/runtime
+    # 转换大部头书籍时临时文件较多，给容器留出足够的共享内存。
+    shm_size: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "curl -kfsS https://127.0.0.1:8766/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  autobook-config:
+  autobook-runtime:

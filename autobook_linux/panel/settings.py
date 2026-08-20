@@ -11,6 +11,32 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 VALID_ROLES = {"all", "gateway", "worker"}
 
 
+def in_container() -> bool:
+    """True when the panel runs inside the project's Docker image."""
+    if os.environ.get("AUTOBOOK_CONTAINER", "").strip() in {"1", "true", "yes"}:
+        return True
+    return Path("/.dockerenv").is_file()
+
+
+def supervisor_backend() -> str:
+    """Which process manager owns the gateway and worker processes."""
+    choice = os.environ.get("AUTOBOOK_SUPERVISOR", "").strip().lower()
+    if choice in {"systemd", "internal"}:
+        return choice
+    return "internal" if in_container() else "systemd"
+
+
+def service_user() -> str:
+    """Unprivileged account the services run as; empty inside the container.
+
+    The container is already an isolation boundary and its bind-mounted volumes
+    would need matching host uids, so there everything runs as root instead.
+    """
+    if in_container():
+        return ""
+    return os.environ.get("AUTOBOOK_SERVICE_USER", "autobook").strip()
+
+
 @dataclass
 class PanelSettings:
     bind: str

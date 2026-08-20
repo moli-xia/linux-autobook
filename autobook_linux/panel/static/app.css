@@ -338,3 +338,16 @@ a { color: var(--accent); }
   .topbar { padding: 13px 15px; }
   .card { padding: 16px; }
 }
+
+/* ---------------------------------------------------------- passwords */
+.password-table td:first-child { color: var(--muted); width: 56px; font-variant-numeric: tabular-nums; }
+.password-table td { vertical-align: middle; }
+.password-value { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
+.row-actions { white-space: nowrap; width: 1%; }
+.row-actions .btn { margin-left: 6px; }
+.password-table .input-row { max-width: 520px; }
+.input-row > input, .input-row > select {
+  flex: 1; background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+  border-radius: 10px; padding: 10px 12px; font: inherit; min-width: 0;
+}
+.input-row > input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }

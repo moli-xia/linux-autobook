@@ -7,6 +7,7 @@ wrong instead of reading a stack trace in journald.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import socket
 import ssl
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from autobook_linux.panel import schema
+from autobook_linux.panel.settings import service_user
 
 USER_AGENT = "autobook-admin-panel/2.0"
 
@@ -298,12 +300,13 @@ def check_drive(values: dict[str, str]) -> CheckResult:
     return CheckResult("drive", "结果网盘登录", "ok", "账号密码有效，可以上传成品")
 
 
-def check_paths(values: dict[str, str], service_user: str = "autobook") -> CheckResult:
+def check_paths(values: dict[str, str], owner: str | None = None) -> CheckResult:
     """Check that the service account can write its working directories.
 
     This must never create the directories itself: the panel runs as root, so a
     directory it created would be root-owned and unusable by the service.
     """
+    owner = service_user() if owner is None else owner
     problems: list[str] = []
     pending: list[str] = []
     for key in ("WORK_ROOT", "DOWNLOAD_ROOT"):
@@ -315,12 +318,16 @@ def check_paths(values: dict[str, str], service_user: str = "autobook") -> Check
         if not probe_path.is_dir():
             problems.append(f"{raw}: 上级目录不存在")
             continue
-        probe = subprocess.run(
-            ["runuser", "--user", service_user, "--", "test", "-w", str(probe_path)],
-            capture_output=True, text=True, timeout=15,
-        )
-        if probe.returncode != 0:
-            problems.append(f"{raw}: 服务账号 {service_user} 无写入权限")
+        if owner:
+            probe = subprocess.run(
+                ["runuser", "--user", owner, "--", "test", "-w", str(probe_path)],
+                capture_output=True, text=True, timeout=15,
+            )
+            writable = probe.returncode == 0
+        else:
+            writable = os.access(probe_path, os.W_OK)
+        if not writable:
+            problems.append(f"{raw}: {('服务账号 ' + owner) if owner else '当前账号'} 无写入权限")
         elif not target.is_dir():
             pending.append(raw)
     if problems:

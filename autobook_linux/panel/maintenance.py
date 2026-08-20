@@ -1,28 +1,26 @@
 """Maintenance actions and worker activity reporting."""
 from __future__ import annotations
 
-import os
 import re
 import secrets
-import shutil
 import subprocess
 import time
 from pathlib import Path
 
+from autobook_linux.panel import services
 from autobook_linux.panel.envfile import read_env_file, write_env_file
 from autobook_linux.panel.jobs import Job, JobManager
 from autobook_linux.panel.schema import key_order
 from autobook_linux.panel.services import redact
-from autobook_linux.panel.settings import PanelSettings
+from autobook_linux.panel.settings import PanelSettings, in_container, service_user
 
-SERVICE_USER = "autobook"
 BACKUP_DIR = Path("/var/backups/linux-autobook")
 
 CLAIM_RE = re.compile(r"领取任务 #(\d+): (.*)$")
 PROGRESS_RE = re.compile(r"\[#(\d+)\] (.*)$")
 DONE_RE = re.compile(r"任务 #(\d+) 完成: (\S+)")
 FAIL_RE = re.compile(r"任务 #(\d+) 失败: (.*)$")
-STAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T[\d:+-]+)")
+STAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}[T ][\d:,+-]+)")
 
 
 def generate_token() -> str:
@@ -33,6 +31,12 @@ def generate_token() -> str:
 
 
 def fix_dependencies(manager: JobManager) -> Job:
+    if in_container():
+        script = (
+            "echo '容器镜像已内置全部依赖，无需安装。'; "
+            "for tool in 7z aria2c openssl; do printf '%-10s ' \"$tool\"; command -v \"$tool\" || echo '缺失'; done"
+        )
+        return manager.spawn_command("deps", "检查系统依赖", ["bash", "-lc", script], timeout=120)
     script = (
         "set -e; export DEBIAN_FRONTEND=noninteractive; "
         "apt-get update; "
@@ -44,12 +48,16 @@ def fix_dependencies(manager: JobManager) -> Job:
 
 def fix_permissions(settings: PanelSettings, manager: JobManager) -> Job:
     install = settings.install_dir
+    owner = service_user()
+    own = f"chown -R {owner}:{owner} '{install}/runtime'; " if owner else ""
+    own_dict = (
+        f"chown {owner}:{owner} '{install}/password.txt'; " if owner else ""
+    )
     script = (
         f"set -e; "
-        f"install -d -m 750 -o {SERVICE_USER} -g {SERVICE_USER} '{install}/runtime'; "
-        f"chown -R {SERVICE_USER}:{SERVICE_USER} '{install}/runtime'; "
-        f"if [ -f '{install}/password.txt' ]; then chown {SERVICE_USER}:{SERVICE_USER} '{install}/password.txt'; "
-        f"chmod 600 '{install}/password.txt'; fi; "
+        f"mkdir -p '{install}/runtime'; chmod 750 '{install}/runtime'; "
+        f"{own}"
+        f"if [ -f '{install}/password.txt' ]; then {own_dict}chmod 600 '{install}/password.txt'; fi; "
         f"chmod 600 {settings.config_dir}/*.env 2>/dev/null || true; "
         f"echo '目录属主与权限已修复'; ls -ld '{install}/runtime'"
     )
@@ -62,12 +70,14 @@ def regenerate_gateway_cert(settings: PanelSettings, manager: JobManager, host: 
     key = values.get("GATEWAY_TLS_KEY") or str(settings.install_dir / "runtime" / "gateway.key")
     safe_host = host if re.fullmatch(r"[A-Za-z0-9._:-]{1,253}", host or "") else "localhost"
     san = f"IP:{safe_host}" if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", safe_host) else f"DNS:{safe_host}"
+    owner = service_user()
+    chown_step = f"chown {owner}:{owner} '{cert}' '{key}'; " if owner else ""
     script = (
         f"set -e; rm -f '{cert}' '{key}'; "
         f"openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 825 "
         f"-keyout '{key}' -out '{cert}' -subj '/CN={safe_host}' "
         f"-addext 'subjectAltName={san},DNS:localhost,IP:127.0.0.1'; "
-        f"chown {SERVICE_USER}:{SERVICE_USER} '{cert}' '{key}'; chmod 644 '{cert}'; chmod 640 '{key}'; "
+        f"{chown_step}chmod 644 '{cert}'; chmod 640 '{key}'; "
         f"openssl x509 -in '{cert}' -noout -subject -enddate -ext subjectAltName; "
         f"echo '证书已重新生成，请把 {cert} 复制到所有 Worker 并重启网关'"
     )
@@ -87,6 +97,11 @@ def backup_config(settings: PanelSettings, manager: JobManager) -> Job:
 
 
 def update_application(settings: PanelSettings, manager: JobManager) -> Job:
+    if in_container():
+        raise ValueError(
+            "容器部署请在宿主机拉取新镜像后重建容器："
+            "docker compose pull && docker compose up -d"
+        )
     installer = settings.install_dir / "install.sh"
     state = read_env_file(settings.install_env)
     repo = state.get("REPO_URL") or "https://github.com/moli-xia/linux-autobook.git"
@@ -97,6 +112,23 @@ def update_application(settings: PanelSettings, manager: JobManager) -> Job:
     )
     # The installer restarts the panel, so the work must outlive this process.
     return manager.spawn_supervised("update", "更新程序", script, timeout=2400)
+
+
+def switch_role_in_container(settings: PanelSettings, role: str) -> str:
+    """Change roles without reinstalling: the supervisor owns the processes."""
+    if role not in {"all", "gateway", "worker"}:
+        raise ValueError("无效的角色")
+    state = read_env_file(settings.install_env)
+    state["INSTALL_ROLE"] = role
+    write_env_file(settings.install_env, state, ["INSTALL_DIR", "CONFIG_DIR", "INSTALL_ROLE", "PUBLIC_HOST"])
+    wanted = {"gateway", "worker"} if role == "all" else {role}
+    stopped = []
+    for name in ("gateway", "worker"):
+        if name not in wanted and services.status(name)["running"]:
+            services.control(name, "stop")
+            stopped.append(name)
+    suffix = f"，已停止 {'、'.join(stopped)}" if stopped else ""
+    return f"本机角色已切换为 {role}{suffix}。请在概览页启动需要的服务。"
 
 
 def switch_role(settings: PanelSettings, manager: JobManager, role: str) -> Job:
@@ -116,6 +148,13 @@ def switch_role(settings: PanelSettings, manager: JobManager, role: str) -> Job:
 
 def restart_panel() -> None:
     """Restart the panel itself shortly after the HTTP reply is flushed."""
+    if in_container():
+        # Docker's restart policy brings the container straight back up.
+        subprocess.Popen(
+            ["bash", "-lc", "sleep 1; kill 1"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+        return
     subprocess.Popen(
         ["bash", "-lc", "sleep 1; systemctl restart autobook-admin.service"],
         stdout=subprocess.DEVNULL,
@@ -135,58 +174,14 @@ def rotate_gateway_token(settings: PanelSettings) -> str:
     return token
 
 
-# ------------------------------------------------------------ password dict
-
-
-def read_password_dict(settings: PanelSettings) -> dict[str, object]:
-    values = read_env_file(settings.worker_env)
-    path = Path(values.get("PASSWORD_DICT") or (settings.install_dir / "password.txt"))
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        text = ""
-    entries = [line for line in text.splitlines() if line.strip()]
-    return {"path": str(path), "count": len(entries), "content": "\n".join(entries)}
-
-
-def write_password_dict(settings: PanelSettings, content: str) -> int:
-    values = read_env_file(settings.worker_env)
-    path = Path(values.get("PASSWORD_DICT") or (settings.install_dir / "password.txt"))
-    resolved = path.resolve()
-    allowed_root = settings.install_dir.resolve()
-    if not str(resolved).startswith(str(allowed_root)):
-        raise ValueError("密码字典必须位于程序安装目录内")
-    entries = [line.strip() for line in content.splitlines() if line.strip()]
-    if len(entries) > 20000:
-        raise ValueError("密码字典最多 20000 行")
-    tmp = resolved.with_name(f".{resolved.name}.{secrets.token_hex(6)}.tmp")
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as output:
-            output.write("\n".join(entries) + "\n")
-        os.replace(tmp, resolved)
-        os.chmod(resolved, 0o600)
-        if os.name != "nt":
-            try:
-                shutil.chown(resolved, user=SERVICE_USER, group=SERVICE_USER)
-            except (LookupError, PermissionError):
-                pass
-    finally:
-        Path(tmp).unlink(missing_ok=True)
-    return len(entries)
-
-
 # ---------------------------------------------------------------- activity
 
 
 def worker_activity(limit: int = 25) -> list[dict[str, object]]:
     """Reconstruct recent task outcomes from the worker journal."""
     try:
-        result = subprocess.run(
-            ["journalctl", "-u", "autobook-worker.service", "-n", "4000", "--no-pager", "--output=short-iso"],
-            capture_output=True, text=True, errors="replace", timeout=30,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+        text = services.logs("worker", lines=1000)
+    except Exception:
         return []
     tasks: dict[str, dict[str, object]] = {}
 
@@ -199,7 +194,7 @@ def worker_activity(limit: int = 25) -> list[dict[str, object]]:
         entry["updated"] = stamp
         return entry
 
-    for line in result.stdout.splitlines():
+    for line in text.splitlines():
         stamp_match = STAMP_RE.match(line)
         stamp = stamp_match.group(1) if stamp_match else ""
         claim = CLAIM_RE.search(line)

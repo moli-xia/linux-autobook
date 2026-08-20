@@ -15,6 +15,9 @@
     logFollow: true,
     activity: [],
     passwords: null,
+    passwordFilter: "",
+    passwordBulk: false,
+    editingPassword: null,
     jobId: null,
     jobOffsetSeen: 0,
     dirty: {},
@@ -30,6 +33,7 @@
     { id: "baidu", icon: "▤", label: "百度登录", title: "百度登录", sub: "扫码获取百度网盘登录态", role: "gateway" },
     { id: "logs", icon: "≡", label: "运行日志", title: "运行日志", sub: "实时查看各服务日志" },
     { id: "activity", icon: "☰", label: "任务记录", title: "任务记录", sub: "最近领取与交付的任务", role: "worker" },
+    { id: "passwords", icon: "⚿", label: "解压密码", title: "解压密码字典", sub: "加密压缩包的候选密码，可增删改", role: "worker" },
     { id: "maintenance", icon: "⛭", label: "维护", title: "维护", sub: "依赖修复、证书、更新与备份" },
     { id: "account", icon: "⚿", label: "管理账号", title: "管理账号", sub: "修改面板登录用户名与密码" },
   ];
@@ -241,7 +245,7 @@
     render();
     if (id === "logs") loadLogs();
     if (id === "activity") loadActivity();
-    if (id === "maintenance" && !state.passwords) loadPasswords();
+    if (id === "passwords" && !state.passwords) loadPasswords();
   }
 
   // ------------------------------------------------------------- polling
@@ -293,6 +297,7 @@
       case "baidu": html = viewBaidu(); break;
       case "logs": html = viewLogs(); break;
       case "activity": html = viewActivity(); break;
+      case "passwords": html = viewPasswords(); break;
       case "maintenance": html = viewMaintenance(); break;
       case "account": html = viewAccount(); break;
       default: html = viewOverview();
@@ -766,18 +771,88 @@
     }).catch(function (exc) { toast(exc.message, "bad"); });
   }
 
+  // ----------------------------------------------------------- passwords
+  function viewPasswords() {
+    var dict = state.passwords;
+    if (!dict) return '<div class="card">正在载入密码字典…</div>';
+    var filter = state.passwordFilter.toLowerCase();
+    var entries = dict.entries.filter(function (value) {
+      return !filter || value.toLowerCase().indexOf(filter) !== -1;
+    });
+    var header = '<div class="card"><div class="card-head"><div><h3>解压密码字典</h3>'
+      + "<p>加密压缩包会按这里的顺序逐个尝试密码（程序总是先试空密码）。程序内置 "
+      + dict.defaults_count + " 条常见密码，你可以在此自由增加、修改和删除。</p></div>"
+      + '<div class="card-actions">'
+      + '<span class="pill info">共 ' + dict.count + " 条</span>"
+      + (dict.custom_count ? '<span class="pill ok">自定义 ' + dict.custom_count + " 条</span>" : "")
+      + (dict.missing_defaults ? '<span class="pill warn">缺少 ' + dict.missing_defaults + " 条内置</span>" : "")
+      + "</div></div>"
+      + '<div class="input-row"><input type="text" id="password-new" placeholder="输入要新增的密码，按回车或点添加" '
+      + 'spellcheck="false" autocomplete="off">'
+      + '<button class="btn primary" data-action="password-add">添加</button></div>'
+      + '<div class="log-toolbar">'
+      + '<input type="search" data-action="password-filter" placeholder="搜索密码" value="' + esc(state.passwordFilter) + '">'
+      + '<button class="btn small ghost" data-action="password-merge">补充内置字典</button>'
+      + '<button class="btn small ghost" data-action="password-restore">恢复为内置字典</button>'
+      + '<button class="btn small ghost" data-action="password-bulk">'
+      + (state.passwordBulk ? "返回列表编辑" : "批量文本编辑") + "</button>"
+      + "</div>"
+      + '<p class="stat-sub">文件位置 <code>' + esc(dict.path) + "</code>，权限 0600，修改后立即生效，无需重启服务。</p></div>";
+
+    if (state.passwordBulk) {
+      return header + '<div class="card"><div class="card-head"><div><h3>批量编辑</h3>'
+        + "<p>每行一个密码，保存后自动去重并保持顺序。空行与以 # 开头的行会被忽略。</p></div>"
+        + '<div class="card-actions"><button class="btn primary small" data-action="password-save-bulk">保存全部</button></div></div>'
+        + '<div class="field"><textarea id="password-bulk" spellcheck="false">' + esc(dict.content) + "</textarea></div></div>";
+    }
+
+    var rows = entries.map(function (value, index) {
+      var editing = state.editingPassword === value;
+      var cell = editing
+        ? '<div class="input-row"><input type="text" class="password-edit" value="' + esc(value) + '" spellcheck="false">'
+          + '<button class="btn small primary" data-action="password-save-one" data-value="' + esc(value) + '">保存</button>'
+          + '<button class="btn small ghost" data-action="password-cancel">取消</button></div>'
+        : '<code class="password-value">' + esc(value) + "</code>";
+      return "<tr><td>" + (index + 1) + "</td><td>" + cell + "</td>"
+        + '<td class="row-actions">'
+        + (editing ? "" : '<button class="btn small ghost" data-action="password-edit" data-value="' + esc(value) + '">修改</button>'
+            + '<button class="btn small ghost" data-action="password-delete" data-value="' + esc(value) + '">删除</button>')
+        + "</td></tr>";
+    }).join("");
+
+    var body = rows
+      ? '<div class="table-wrap"><table class="table password-table"><thead><tr><th>#</th><th>密码</th><th>操作</th></tr></thead>'
+        + "<tbody>" + rows + "</tbody></table></div>"
+      : '<div class="empty-state">'
+        + (filter ? "没有匹配的密码。" : "字典为空，点上面的「恢复为内置字典」即可载入内置密码。") + "</div>";
+    return header + '<div class="card">'
+      + (filter ? '<p class="stat-sub">匹配 ' + entries.length + " 条</p>" : "") + body + "</div>";
+  }
+
+  function loadPasswords() {
+    return api("/api/passwords").then(function (result) {
+      state.passwords = result;
+      if (state.view === "passwords") render();
+    }).catch(function (exc) { toast(exc.message, "bad"); });
+  }
+
+  function passwordAction(body, successMessage) {
+    return api("/api/passwords", { method: "POST", body: body }).then(function (result) {
+      state.passwords = result;
+      state.editingPassword = null;
+      toast(successMessage || result.message, "ok");
+      render();
+    }).catch(function (exc) { toast(exc.message, "bad"); });
+  }
+
   // --------------------------------------------------------- maintenance
   function viewMaintenance() {
     var job = state.jobSnapshot;
-    var passwordCard = "";
-    if (hasRole("worker")) {
-      var dict = state.passwords || { count: 0, content: "", path: "" };
-      passwordCard = '<div class="card"><div class="card-head"><div><h3>解压密码字典</h3>'
-        + "<p>加密压缩包会按这里的顺序逐个尝试密码，每行一个。当前共 " + dict.count + " 条，文件位置 <code>"
-        + esc(dict.path) + "</code>。</p></div>"
-        + '<div class="card-actions"><button class="btn small primary" data-action="save-passwords">保存字典</button></div></div>'
-        + '<div class="field"><textarea id="password-dict" spellcheck="false">' + esc(dict.content) + "</textarea></div></div>";
-    }
+    var passwordCard = hasRole("worker")
+      ? '<div class="card"><div class="card-head"><div><h3>解压密码字典</h3>'
+        + "<p>加密压缩包的候选密码已移到独立页面，可逐条增加、修改、删除。</p></div>"
+        + '<div class="card-actions"><button class="btn small ghost" data-view="passwords">打开密码字典</button></div></div></div>'
+      : "";
 
     var roleCard = '<div class="card"><div class="card-head"><div><h3>本机角色</h3>'
       + "<p>当前为 <strong>" + esc({ all: "网关 + Worker", gateway: "仅网关", worker: "仅 Worker" }[state.session.role]) + "</strong>。"
@@ -813,13 +888,6 @@
       + '<div class="stat-sub">' + esc(description) + "</div>"
       + '<div class="service-actions"><button class="btn small ghost" data-action="maintain" data-op="'
       + action + '">执行</button></div></div>';
-  }
-
-  function loadPasswords() {
-    return api("/api/passwords").then(function (result) {
-      state.passwords = result;
-      if (state.view === "maintenance") render();
-    }).catch(function () {});
   }
 
   function pollJob() {
@@ -933,13 +1001,46 @@
       loadLogs();
     } else if (action === "reload-activity") {
       loadActivity();
-    } else if (action === "save-passwords") {
-      var content = $("password-dict").value;
-      api("/api/passwords", { method: "POST", body: { content: content } }).then(function (result) {
-        toast(result.message, "ok");
-        state.passwords = null;
-        loadPasswords();
-      }).catch(function (exc) { toast(exc.message, "bad"); });
+    } else if (action === "password-add") {
+      var newInput = $("password-new");
+      var newValue = newInput ? newInput.value.trim() : "";
+      if (!newValue) { toast("请先输入要添加的密码", "warn"); return; }
+      passwordAction({ action: "add", value: newValue });
+    } else if (action === "password-edit") {
+      state.editingPassword = node.getAttribute("data-value");
+      render();
+      var editField = document.querySelector(".password-edit");
+      if (editField) editField.focus();
+    } else if (action === "password-cancel") {
+      state.editingPassword = null;
+      render();
+    } else if (action === "password-save-one") {
+      var editInput = document.querySelector(".password-edit");
+      passwordAction({
+        action: "update",
+        value: node.getAttribute("data-value"),
+        new_value: editInput ? editInput.value : "",
+      });
+    } else if (action === "password-delete") {
+      var doomed = node.getAttribute("data-value");
+      confirmDialog("删除密码", "确定要从字典中删除 <code>" + esc(doomed) + "</code> 吗？", "删除")
+        .then(function (confirmed) {
+          if (confirmed) passwordAction({ action: "delete", value: doomed });
+        });
+    } else if (action === "password-restore") {
+      confirmDialog("恢复内置字典",
+        "会用程序内置的密码列表<strong>覆盖</strong>当前字典，你自己添加的密码将丢失。"
+        + "如果只想补齐缺少的内置密码，请改用「补充内置字典」。", "覆盖")
+        .then(function (confirmed) {
+          if (confirmed) passwordAction({ action: "restore_defaults" });
+        });
+    } else if (action === "password-merge") {
+      passwordAction({ action: "merge_defaults" });
+    } else if (action === "password-bulk") {
+      state.passwordBulk = !state.passwordBulk;
+      render();
+    } else if (action === "password-save-bulk") {
+      passwordAction({ action: "replace", content: $("password-bulk").value });
     } else if (action === "maintain") {
       doMaintenance(node.getAttribute("data-op"));
     } else if (action === "switch-role") {
@@ -976,11 +1077,38 @@
 
   var filterTimer = null;
   document.addEventListener("input", function (event) {
-    var node = event.target.closest('[data-action="log-filter"]');
-    if (!node) return;
-    state.logFilter = node.value;
-    clearTimeout(filterTimer);
-    filterTimer = setTimeout(loadLogs, 350);
+    var logNode = event.target.closest('[data-action="log-filter"]');
+    if (logNode) {
+      state.logFilter = logNode.value;
+      clearTimeout(filterTimer);
+      filterTimer = setTimeout(loadLogs, 350);
+      return;
+    }
+    var passwordNode = event.target.closest('[data-action="password-filter"]');
+    if (passwordNode) {
+      state.passwordFilter = passwordNode.value;
+      clearTimeout(filterTimer);
+      filterTimer = setTimeout(function () {
+        render();
+        var restored = document.querySelector('[data-action="password-filter"]');
+        if (restored) {
+          restored.focus();
+          restored.setSelectionRange(restored.value.length, restored.value.length);
+        }
+      }, 250);
+    }
+  });
+
+  document.addEventListener("keydown", function (event) {
+    if (event.key !== "Enter") return;
+    if (event.target.id === "password-new") {
+      event.preventDefault();
+      handleAction(document.querySelector('[data-action="password-add"]'));
+    } else if (event.target.classList.contains("password-edit")) {
+      event.preventDefault();
+      var saveButton = document.querySelector('[data-action="password-save-one"]');
+      if (saveButton) handleAction(saveButton);
+    }
   });
 
   function doService(service, op) {
