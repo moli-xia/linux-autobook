@@ -17,7 +17,7 @@ PURGE=0
 NON_INTERACTIVE=0
 REPO_URL_OVERRIDE="${AUTOBOOK_REPO_URL:-}"
 REPO_BRANCH_OVERRIDE="${AUTOBOOK_BRANCH:-}"
-REPO_URL="${REPO_URL_OVERRIDE:-https://github.com/moli-xia/autobook.git}"
+REPO_URL="${REPO_URL_OVERRIDE:-https://github.com/moli-xia/linux-autobook.git}"
 REPO_BRANCH="${REPO_BRANCH_OVERRIDE:-main}"
 SOURCE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 

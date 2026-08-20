@@ -8,7 +8,7 @@
 # 可以在网页上启停；配置与运行数据放在具名卷里，重建容器不会丢。
 services:
   autobook:
-    image: ${AUTOBOOK_IMAGE:-ghcr.io/moli-xia/autobook:latest}
+    image: ${AUTOBOOK_IMAGE:-ghcr.io/moli-xia/linux-autobook:latest}
     container_name: autobook
     restart: unless-stopped
     # The gateway and worker both need the host clock and outbound access only.

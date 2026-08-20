@@ -1,4 +1,4 @@
-# autobook Docker 部署说明
+# linux-autobook Docker 部署说明
 
 镜像同时支持 **linux/amd64** 与 **linux/arm64**（x86 服务器和 ARM 服务器都能跑）。
 一个容器里包含管理面板、百度下载网关和任务 Worker，三者由面板内置的进程管理器托管，
@@ -23,7 +23,7 @@
 前提：服务器已安装 Docker（没有的话 `curl -fsSL https://get.docker.com | sh`）。
 
 ```bash
-git clone https://github.com/moli-xia/autobook.git && cd autobook
+git clone https://github.com/moli-xia/linux-autobook.git && cd linux-autobook
 cp docker/.env.example .env && sed -i 's/^AUTOBOOK_PUBLIC_HOST=.*/AUTOBOOK_PUBLIC_HOST=你的服务器IP/' .env
 docker compose up -d
 ```
@@ -71,7 +71,7 @@ docker compose up -d
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `AUTOBOOK_ROLE` | `all` | `all` = 网关 + Worker（主服务器）；`gateway` = 仅网关；`worker` = 仅 Worker |
-| `AUTOBOOK_IMAGE` | `ghcr.io/moli-xia/autobook:latest` | 用自建镜像时改这里 |
+| `AUTOBOOK_IMAGE` | `ghcr.io/moli-xia/linux-autobook:latest` | 用自建镜像时改这里 |
 | `ADMIN_PORT` | `8766` | 管理面板端口 |
 | `GATEWAY_PORT` | `8765` | 下载网关端口，仅网关角色需要对外放行 |
 | `TZ` | `Asia/Shanghai` | 容器时区，影响日志时间戳 |

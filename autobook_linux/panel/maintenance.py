@@ -104,7 +104,7 @@ def update_application(settings: PanelSettings, manager: JobManager) -> Job:
         )
     installer = settings.install_dir / "install.sh"
     state = read_env_file(settings.install_env)
-    repo = state.get("REPO_URL") or "https://github.com/moli-xia/autobook.git"
+    repo = state.get("REPO_URL") or "https://github.com/moli-xia/linux-autobook.git"
     branch = state.get("REPO_BRANCH") or "main"
     script = (
         f"set -e; export AUTOBOOK_REPO_URL='{repo}'; export AUTOBOOK_BRANCH='{branch}'; "

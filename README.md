@@ -1,4 +1,4 @@
-# autobook
+# linux-autobook
 
 在无图形界面的 Linux 服务器上运行的分布式文献传递系统。中心下载网关独占百度登录 Cookie；
 任意数量的 Worker 通过 TLS 网关取得原始文件，解压并将 PDG 页面合成为 PDF，
@@ -18,7 +18,7 @@
 **A. Docker（推荐，amd64 与 arm64 通用）**
 
 ```bash
-git clone https://github.com/moli-xia/autobook.git && cd autobook
+git clone https://github.com/moli-xia/linux-autobook.git && cd linux-autobook
 cp docker/.env.example .env      # 至少填写 AUTOBOOK_PUBLIC_HOST=你的服务器IP
 docker compose up -d
 ```
@@ -26,7 +26,7 @@ docker compose up -d
 **B. systemd 一键安装**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/moli-xia/autobook/main/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/moli-xia/linux-autobook/main/install.sh -o install.sh
 sudo bash install.sh             # 交互菜单，全部回车即可
 ```
 
@@ -175,15 +175,15 @@ sudo apt-get install -y git python3 python3-venv python3-pip p7zip-full aria2
 在 Ubuntu/Debian 服务器取得完整仓库后执行：
 
 ```bash
-git clone https://github.com/moli-xia/autobook.git
-cd autobook
+git clone https://github.com/moli-xia/linux-autobook.git
+cd linux-autobook
 sudo bash install.sh
 ```
 
 私有仓库可先使用已登录的 GitHub CLI：
 
 ```bash
-gh repo clone moli-xia/autobook && cd autobook && sudo bash install.sh
+gh repo clone moli-xia/linux-autobook && cd linux-autobook && sudo bash install.sh
 ```
 
 不带参数运行时会显示中文菜单，可选择：
@@ -237,7 +237,7 @@ sudo bash install.sh --action install --role all \
 完整说明见 **[docs/Docker部署说明.md](docs/Docker部署说明.md)**。
 
 ```bash
-git clone https://github.com/moli-xia/autobook.git && cd autobook
+git clone https://github.com/moli-xia/linux-autobook.git && cd linux-autobook
 cp docker/.env.example .env      # 至少填写 AUTOBOOK_PUBLIC_HOST
 docker compose up -d
 ```
@@ -253,7 +253,7 @@ docker compose up -d
 ### 手工安装
 
 ```bash
-sudo git clone https://github.com/moli-xia/autobook.git /opt/autobook-linux
+sudo git clone https://github.com/moli-xia/linux-autobook.git /opt/autobook-linux
 cd /opt/autobook-linux
 
 python3 -m venv .venv
