@@ -6,6 +6,6 @@ environment is fully provisioned.
 """
 from __future__ import annotations
 
-PANEL_VERSION = "2.1.0"
+PANEL_VERSION = "2.2.0"
 
 __all__ = ["PANEL_VERSION"]

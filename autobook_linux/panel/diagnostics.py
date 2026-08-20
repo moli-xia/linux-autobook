@@ -22,7 +22,7 @@ from typing import Any
 from autobook_linux.panel import schema
 from autobook_linux.panel.settings import service_user
 
-USER_AGENT = "autobook-admin-panel/2.0"
+USER_AGENT = "autobook-admin-panel/2.2"
 
 
 @dataclass
