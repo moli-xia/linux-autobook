@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>linux-autobook 管理面板</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="boot" class="boot"><div class="spinner"></div><p>正在载入管理面板…</p></div>
+
+<!-- ------------------------------------------------------------ login -->
+<section id="login-view" class="login-view hidden">
+  <form class="login-card" id="login-form" autocomplete="on">
+    <div class="login-brand">
+      <div class="logo">AB</div>
+      <div>
+        <h1>linux-autobook</h1>
+        <p>文献传递集群管理面板</p>
+      </div>
+    </div>
+    <div class="field">
+      <label for="login-user">用户名</label>
+      <input id="login-user" name="username" autocomplete="username" required autofocus>
+    </div>
+    <div class="field">
+      <label for="login-pass">密码</label>
+      <input id="login-pass" name="password" type="password" autocomplete="current-password" required>
+    </div>
+    <button class="btn primary block" type="submit">登录</button>
+    <p class="login-hint">首次安装的默认账号与密码均为 <code>admin</code>，登录后面板会引导你立即修改。</p>
+    <p class="login-error hidden" id="login-error"></p>
+  </form>
+</section>
+
+<!-- -------------------------------------------------------------- app -->
+<div id="app" class="app hidden">
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <div class="logo">AB</div>
+      <div class="sidebar-title">
+        <strong>linux-autobook</strong>
+        <span id="role-badge" class="role-badge">—</span>
+      </div>
+    </div>
+    <nav id="nav" class="nav"></nav>
+    <div class="sidebar-foot">
+      <div class="who"><span id="who-user">—</span></div>
+      <button class="btn ghost small" id="logout-btn" type="button">退出登录</button>
+      <div class="version">面板版本 <span id="panel-version">—</span></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <button class="btn ghost icon menu-toggle" id="menu-toggle" type="button" aria-label="菜单">☰</button>
+      <div class="topbar-title">
+        <h2 id="page-title">概览</h2>
+        <p id="page-sub"></p>
+      </div>
+      <div class="topbar-actions">
+        <span id="auto-state" class="auto-state">自动刷新中</span>
+        <button class="btn ghost small" id="refresh-btn" type="button">刷新</button>
+      </div>
+    </header>
+
+    <div id="banner-area" class="banner-area"></div>
+    <div id="views" class="views"></div>
+  </main>
+</div>
+
+<div id="toasts" class="toasts"></div>
+
+<div id="modal" class="modal hidden">
+  <div class="modal-card">
+    <h3 id="modal-title">提示</h3>
+    <div id="modal-body" class="modal-body"></div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="modal-cancel" type="button">取消</button>
+      <button class="btn primary" id="modal-ok" type="button">确定</button>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

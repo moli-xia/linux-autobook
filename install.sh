@@ -184,6 +184,8 @@ uninstall_app() {
   fi
   rm -f /etc/systemd/system/autobook-admin.service /etc/systemd/system/autobook-gateway.service /etc/systemd/system/autobook-worker.service
   rm -f /etc/letsencrypt/renewal-hooks/deploy/autobook-cert-deploy /usr/local/sbin/autobook-cert-deploy
+  rm -f /usr/local/bin/autobook
+  rm -rf /var/tmp/autobook-jobs
   rm -rf -- "$INSTALL_DIR" "$CONFIG_DIR"
   systemctl daemon-reload
   systemctl reset-failed
@@ -413,6 +415,8 @@ ADMIN_PORT=$ADMIN_PORT
 ADMIN_TLS_CERT=$CONFIG_DIR/admin.crt
 ADMIN_TLS_KEY=$CONFIG_DIR/admin.key
 ADMIN_STATE_FILE=$CONFIG_DIR/admin-state.json
+ADMIN_CONFIG_DIR=$CONFIG_DIR
+ADMIN_INSTALL_DIR=$INSTALL_DIR
 ADMIN_GATEWAY_ENV=$CONFIG_DIR/gateway.env
 ADMIN_WORKER_ENV=$CONFIG_DIR/worker.env
 ADMIN_SESSION_SECONDS=28800
@@ -445,6 +449,12 @@ if [[ "$ROLE" == "all" || "$ROLE" == "gateway" ]]; then
 fi
 
 install -m 755 -o root -g root "$INSTALL_DIR/deploy/autobook-cert-deploy.sh" /usr/local/sbin/autobook-cert-deploy
+cat > /usr/local/bin/autobook <<EOF
+#!/usr/bin/env bash
+# Shortcut for the linux-autobook installer menu.
+exec bash "$INSTALL_DIR/install.sh" "\$@"
+EOF
+chmod 755 /usr/local/bin/autobook
 if [[ -n "$DOMAIN" ]]; then
   if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then ufw allow 80/tcp comment 'ACME HTTP-01' >/dev/null; fi
   install -d -m 755 /etc/letsencrypt/renewal-hooks/deploy
@@ -517,14 +527,23 @@ fi
 
 if [[ "$PUBLIC_HOST" == *:* ]]; then PANEL_URL="https://[${PUBLIC_HOST}]:${ADMIN_PORT}/"; else PANEL_URL="https://${PUBLIC_HOST}:${ADMIN_PORT}/"; fi
 TLS_MODE="$(sed -n 's/^TLS_MODE=//p' "$CONFIG_DIR/install.env" | tr -d "'")"
+ROLE_LABEL="网关 + Worker（单机全功能）"
+[[ "$ROLE" != "gateway" ]] || ROLE_LABEL="仅百度下载网关"
+[[ "$ROLE" != "worker" ]] || ROLE_LABEL="仅任务 Worker"
 echo
 echo "============================================================"
-echo " linux-autobook installation completed"
-echo " Role: $ROLE"
-echo " TLS:  $TLS_MODE"
-echo " Admin panel: $PANEL_URL"
-echo " Default username: admin"
-echo " Default password: admin"
-echo " Open Quick Setup in the panel; incomplete roles stay stopped."
-echo " Run this script again without arguments for update/status/uninstall menus."
+echo " linux-autobook 安装完成"
+echo "------------------------------------------------------------"
+echo " 本机角色 : $ROLE_LABEL"
+echo " 证书模式 : $TLS_MODE"
+echo " 管理面板 : $PANEL_URL"
+echo " 默认账号 : admin"
+echo " 默认密码 : admin   ← 登录后请立刻修改"
+echo "------------------------------------------------------------"
+echo " 下一步："
+echo "   1. 浏览器打开上面的地址（自签名证书会提示风险，选择继续访问）"
+echo "   2. 用 admin/admin 登录，按左侧「配置向导」逐步填写"
+echo "   3. 点「连通性检测」确认全部通过，再启动服务"
+echo
+echo " 以后直接输入 autobook 即可打开安装/更新/卸载菜单。"
 echo "============================================================"
