@@ -125,26 +125,36 @@ class SupervisorTests(unittest.TestCase):
     def _use_script(self, name: str, body: str) -> None:
         self.supervisor.get(name).command = [sys.executable, "-c", body]
 
+    @staticmethod
+    def _wait_for(predicate, timeout: float = 60.0) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.2)
+        return False
+
     def test_start_stop_and_log_capture(self) -> None:
         self._use_script("worker", "import time;print('worker up', flush=True);time.sleep(30)")
         process = self.supervisor.get("worker")
         process.start()
-        time.sleep(1.0)
         self.assertTrue(process.running())
-        self.assertIn("worker up", process.read_log(50))
-        process.stop(grace=5)
+        self.assertTrue(
+            self._wait_for(lambda: "worker up" in process.read_log(50)),
+            f"child output never reached the log: {process.read_log(50)!r}",
+        )
+        process.stop(grace=10)
         self.assertFalse(process.running())
 
     def test_config_failure_exit_stops_the_restart_loop(self) -> None:
         self._use_script("worker", "raise SystemExit(78)")
         process = self.supervisor.get("worker")
         process.start()
-        for _ in range(50):
+        def exited() -> bool:
             process.reap()
-            if not process.want_running:
-                break
-            time.sleep(0.1)
-        self.assertFalse(process.want_running)
+            return not process.want_running
+
+        self.assertTrue(self._wait_for(exited), "the exit-78 rule never fired")
         self.assertEqual(process.last_exit, 78)
         self.assertIn("配置", process.snapshot()["message"])
 
@@ -163,9 +173,11 @@ class SupervisorTests(unittest.TestCase):
             self.assertFalse(state["running"])
             self.assertTrue(state["installed"])
             services.control("worker", "start")
-            time.sleep(1.0)
             self.assertTrue(services.status("worker", ["worker"])["running"])
-            self.assertIn("hello", services.logs("worker", 50))
+            self.assertTrue(
+                self._wait_for(lambda: "hello" in services.logs("worker", 50)),
+                "the supervised child's output never reached the panel",
+            )
             services.control("worker", "stop")
             self.assertFalse(services.status("worker", ["worker"])["running"])
         finally:
