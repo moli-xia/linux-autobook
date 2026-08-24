@@ -14,6 +14,9 @@
     logFilter: "",
     logFollow: true,
     activity: [],
+    siteTasks: null,
+    taskFilter: "",
+    taskSelection: {},
     passwords: null,
     passwordFilter: "",
     passwordBulk: false,
@@ -38,6 +41,7 @@
     { id: "baidu", icon: "▤", label: "百度登录", title: "百度登录", sub: "扫码获取百度网盘登录态", role: "gateway" },
     { id: "logs", icon: "≡", label: "运行日志", title: "运行日志", sub: "实时查看各服务日志" },
     { id: "activity", icon: "☰", label: "任务记录", title: "任务记录", sub: "最近领取与交付的任务", role: "worker" },
+    { id: "tasks", icon: "▦", label: "任务管理", title: "任务管理", sub: "全站任务、由哪台服务器执行，可删除或清空" },
     { id: "passwords", icon: "⚿", label: "解压密码", title: "解压密码字典", sub: "加密压缩包的候选密码，可增删改", role: "worker" },
     { id: "fleet", icon: "☷", label: "节点管理", title: "节点管理", sub: "统一查看和控制所有 Worker 服务器", role: "gateway" },
     { id: "maintenance", icon: "⛭", label: "维护", title: "维护", sub: "依赖修复、证书、更新与备份" },
@@ -251,6 +255,7 @@
     render();
     if (id === "logs") loadLogs();
     if (id === "activity") loadActivity();
+    if (id === "tasks") loadTasks();
     if (id === "passwords" && !state.passwords) loadPasswords();
     if (id === "fleet") loadFleet();
     if (id === "maintenance" && !state.joinCode) loadJoinCode();
@@ -265,6 +270,7 @@
       if (state.view === "logs" && state.logFollow) loadLogs();
       if (state.view === "baidu") loadBaidu();
       if (state.view === "fleet") loadFleet(true);
+      if (state.view === "tasks") loadTasks();
       if (state.jobId) pollJob();
     }, 5000);
   }
@@ -306,6 +312,7 @@
       case "baidu": html = viewBaidu(); break;
       case "logs": html = viewLogs(); break;
       case "activity": html = viewActivity(); break;
+      case "tasks": html = viewTasks(); break;
       case "passwords": html = viewPasswords(); break;
       case "fleet": html = viewFleet(); break;
       case "maintenance": html = viewMaintenance(); break;
@@ -774,6 +781,120 @@
       + "</div>";
   }
 
+  var TASK_STATUS = {
+    1: { label: "排队中", cls: "info" }, 2: { label: "PDF处理中", cls: "info" },
+    3: { label: "已完成", cls: "ok" }, 4: { label: "失败", cls: "bad" },
+    5: { label: "已取消", cls: "warn" }, 6: { label: "等待格式转换", cls: "info" },
+    7: { label: "格式转换中", cls: "info" },
+  };
+
+  function duration(seconds) {
+    if (!seconds) return "-";
+    if (seconds < 60) return seconds + " 秒";
+    if (seconds < 3600) return Math.floor(seconds / 60) + " 分";
+    return (seconds / 3600).toFixed(1) + " 小时";
+  }
+
+  function viewTasks() {
+    var data = state.siteTasks;
+    if (!data) return '<div class="card"><div class="empty-state">正在读取任务…</div></div>';
+    var canDelete = hasRole("gateway");
+    var selected = state.taskSelection || {};
+
+    var rows = (data.tasks || []).map(function (task) {
+      var meta = TASK_STATUS[task.status] || { label: task.status_label || "未知", cls: "info" };
+      var live = task.status === 2 || task.status === 7;
+      var badge = '<span class="pill ' + meta.cls + '">'
+        + (live ? '<span class="dot live"></span>' : "") + esc(meta.label) + "</span>"
+        + (task.stale ? ' <span class="pill warn">失联</span>' : "");
+      // Which machine holds this book is the whole point of this table.
+      var worker = task.worker_id
+        ? '<code>' + esc(task.worker_id) + "</code>"
+        : '<span class="muted">未分配</span>';
+      return "<tr>"
+        + (canDelete ? '<td><input type="checkbox" data-task-pick="' + task.id + '"'
+            + (selected[task.id] ? " checked" : "") + "></td>" : "")
+        + "<td>#" + esc(task.id) + "</td>"
+        + "<td>" + esc(task.title || "-") + (task.ssno ? '<br><span class="stat-sub">SS ' + esc(task.ssno) + "</span>" : "") + "</td>"
+        + "<td>" + worker + "</td>"
+        + "<td>" + badge + "</td>"
+        + "<td>" + esc(duration(task.elapsed)) + "</td>"
+        + "<td>" + esc(task.message || "")
+        + (task.result_url ? '<br><a href="' + esc(task.result_url) + '" target="_blank" rel="noreferrer noopener">交付链接</a>' : "")
+        + "</td>"
+        + (canDelete ? '<td><button class="btn small danger" data-action="task-del" data-id="' + task.id + '">删除</button></td>' : "")
+        + "</tr>";
+    }).join("");
+
+    var head = "<tr>" + (canDelete ? "<th></th>" : "") + "<th>任务</th><th>书名</th><th>执行服务器</th>"
+      + "<th>状态</th><th>用时</th><th>最新进度</th>" + (canDelete ? "<th>操作</th>" : "") + "</tr>";
+
+    var counts = data.counts || {};
+    var summary = '<div class="grid cols-4">'
+      + stat("执行中", esc(String(data.running || 0)), "正在下载或转换")
+      + stat("排队中", esc(String(data.queued || 0)), "等待被领取")
+      + stat("已完成", esc(String(counts[3] || 0)), "累计交付成功")
+      + stat("失败", esc(String(counts[4] || 0)), "可在下方清空")
+      + "</div>";
+
+    var bulk = canDelete
+      ? '<div class="card-actions">'
+        + '<button class="btn small danger" data-action="task-del-selected">删除选中</button>'
+        + '<button class="btn small ghost" data-action="task-clear" data-statuses="4">清空失败</button>'
+        + '<button class="btn small ghost" data-action="task-clear" data-statuses="3">清空已完成</button>'
+        + '<button class="btn small ghost" data-action="task-clear" data-statuses="1,6">清空排队</button>'
+        + '<button class="btn small danger" data-action="task-clear" data-statuses="1,2,3,4,5,6,7">清空全部</button>'
+        + "</div>"
+      : "";
+
+    var filters = '<div class="card-actions">'
+      + taskFilter("", "全部") + taskFilter("1,2,6,7", "进行中")
+      + taskFilter("3", "已完成") + taskFilter("4", "失败")
+      + '<button class="btn small ghost" data-action="reload-tasks">刷新</button></div>';
+
+    return summary
+      + '<div class="card"><div class="card-head"><div><h3>全站任务</h3>'
+      + "<p>直接来自任务网站，显示每个任务由哪台服务器执行。"
+      + (canDelete ? "删除会把任务从网站彻底移除，无法恢复。"
+                   : "只有网关主服务器可以删除任务，本机为纯 Worker。") + "</p></div>"
+      + filters + "</div>" + bulk
+      + (rows
+          ? '<div class="table-wrap"><table class="table"><thead>' + head + "</thead><tbody>"
+            + rows + "</tbody></table></div>"
+          : '<div class="empty-state">当前筛选条件下没有任务。</div>')
+      + "</div>";
+  }
+
+  function taskFilter(value, label) {
+    var active = (state.taskFilter || "") === value;
+    return '<button class="btn small ' + (active ? "primary" : "ghost")
+      + '" data-action="task-filter" data-status="' + value + '">' + esc(label) + "</button>";
+  }
+
+  function loadTasks() {
+    var query = "/api/tasks?limit=80";
+    if (state.taskFilter) query += "&status=" + encodeURIComponent(state.taskFilter);
+    return api(query).then(function (result) {
+      state.siteTasks = result;
+      if (state.view === "tasks") render();
+    }).catch(function (exc) {
+      state.siteTasks = { tasks: [], counts: {} };
+      if (state.view === "tasks") render();
+      toast(exc.message, "bad");
+    });
+  }
+
+  function taskAdmin(body, confirmTitle, confirmBody) {
+    confirmDialog(confirmTitle, confirmBody, "确认删除").then(function (confirmed) {
+      if (!confirmed) return;
+      api("/api/tasks/delete", { method: "POST", body: body }).then(function (result) {
+        toast(result.message || "已删除", "ok");
+        state.taskSelection = {};
+        loadTasks();
+      }).catch(function (exc) { toast(exc.message, "bad"); });
+    });
+  }
+
   function loadActivity() {
     return api("/api/activity").then(function (result) {
       state.activity = result.tasks || [];
@@ -1229,6 +1350,32 @@
       loadLogs();
     } else if (action === "reload-activity") {
       loadActivity();
+    } else if (action === "reload-tasks") {
+      loadTasks();
+    } else if (action === "task-filter") {
+      state.taskFilter = node.getAttribute("data-status") || "";
+      state.taskSelection = {};
+      loadTasks();
+    } else if (action === "task-del") {
+      var one = parseInt(node.getAttribute("data-id"), 10);
+      taskAdmin({ op: "delete", ids: [one] }, "删除任务",
+        "将把任务 <strong>#" + one + "</strong> 从网站彻底删除，无法恢复。");
+    } else if (action === "task-del-selected") {
+      var picked = Object.keys(state.taskSelection || {})
+        .filter(function (key) { return state.taskSelection[key]; })
+        .map(function (key) { return parseInt(key, 10); });
+      if (!picked.length) { toast("请先勾选要删除的任务", "warn"); return; }
+      taskAdmin({ op: "delete", ids: picked }, "删除选中的任务",
+        "将删除 <strong>" + picked.length + "</strong> 个任务，无法恢复。");
+    } else if (action === "task-clear") {
+      var statuses = (node.getAttribute("data-statuses") || "").split(",")
+        .map(function (one) { return parseInt(one, 10); })
+        .filter(function (one) { return one >= 1 && one <= 7; });
+      if (!statuses.length) return;
+      var running = statuses.indexOf(2) >= 0 || statuses.indexOf(7) >= 0;
+      taskAdmin({ op: "clear", statuses: statuses }, "清空任务",
+        "将删除这些状态下的<strong>全部</strong>任务，无法恢复。"
+        + (running ? "其中包含<strong>正在执行</strong>的任务，正在处理它们的 Worker 会在下次上报时失败。" : ""));
     } else if (action === "password-add") {
       var newInput = $("password-new");
       var newValue = newInput ? newInput.value.trim() : "";
@@ -1401,6 +1548,14 @@
   }
 
   document.addEventListener("change", function (event) {
+    // Task checkboxes carry no data-action, so they are handled before the
+    // lookup below rejects them.
+    var pick = event.target.closest("[data-task-pick]");
+    if (pick) {
+      state.taskSelection = state.taskSelection || {};
+      state.taskSelection[pick.getAttribute("data-task-pick")] = pick.checked;
+      return;
+    }
     var node = event.target.closest("[data-action]");
     if (!node) return;
     var action = node.getAttribute("data-action");

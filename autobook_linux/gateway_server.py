@@ -23,7 +23,7 @@ from autobook_linux.baidu_pan import BaiduPanClient
 from autobook_linux import janitor
 from autobook_linux.config import Config
 from autobook_linux.library_index import pick_best_file
-from autobook_linux.lookup import Lookup, LookupError, validate
+from autobook_linux.lookup import Lookup, LookupError, queries_for, validate
 
 LOGGER = logging.getLogger(__name__)
 _SSNO_RE = re.compile(r"^\d{8}$")
@@ -41,6 +41,10 @@ class GatewayJob:
     request_id: str
     ssno: str
     kind: str = "ss"
+    # Every usable key for this book, most precise first.  A job carrying an SS
+    # number and a title can still fall back to the title when the SS number
+    # finds nothing.
+    plan: list[Lookup] = field(default_factory=list)
     status: str = "pending"
     filename: str = ""
     artifact: Path | None = None
@@ -99,8 +103,23 @@ class GatewayManager:
         self.root.mkdir(parents=True, exist_ok=True)
         LOGGER.info("百度下载网关预检成功 gid=%s", self._gid)
 
-    def submit(self, ssno: str, request_id: str, kind: str = "ss") -> GatewayJob:
+    def submit(
+        self,
+        ssno: str,
+        request_id: str,
+        kind: str = "ss",
+        plan: list[dict] | None = None,
+    ) -> GatewayJob:
         lookup = validate(kind, ssno)
+        # Older workers send only one key; newer ones send the whole plan.
+        lookups = [lookup]
+        for entry in plan or []:
+            try:
+                extra = validate(str(entry.get("kind") or ""), str(entry.get("value") or ""))
+            except LookupError:
+                continue
+            if extra not in lookups:
+                lookups.append(extra)
         if not _REQUEST_ID_RE.fullmatch(request_id):
             raise ValueError("request_id 格式无效")
         self.cleanup_expired()
@@ -114,11 +133,33 @@ class GatewayManager:
                 return existing
             job_id = uuid.uuid4().hex
             job = GatewayJob(job_id=job_id, request_id=request_id,
-                             ssno=lookup.value, kind=lookup.kind)
+                             ssno=lookup.value, kind=lookup.kind, plan=lookups)
             self._jobs[job_id] = job
             self._requests[request_id] = job_id
             self._executor.submit(self._run_job, job_id)
             return job
+
+    def _resolve(self, client, gid: str, job: "GatewayJob"):
+        """Search for the book, trying every key and every query form.
+
+        The group search matches the query as one phrase, so a title carrying
+        an author and a year has to be shortened before it finds anything.
+        Candidates are still judged against the full title, so a short query
+        cannot hand back a different book.
+        """
+        plan = job.plan or [Lookup(job.kind, job.ssno)]
+        for lookup in plan:
+            for query in queries_for(lookup):
+                try:
+                    candidates = client.search_group_files(gid, query)
+                except Exception as exc:  # noqa: BLE001 - try the next form
+                    LOGGER.warning("检索 %r 失败: %s", query, exc)
+                    continue
+                item = pick_best_file(candidates, lookup.value, lookup.kind)
+                if item is not None:
+                    return item, lookup
+                LOGGER.debug("检索 %r 无匹配（%d 条候选）", query, len(candidates))
+        return None, None
 
     def _run_job(self, job_id: str) -> None:
         with self._lock:
@@ -137,11 +178,11 @@ class GatewayManager:
             if not gid:
                 gid = client.resolve_gid(self.config.baidu_group_name)
                 self._gid = gid
-            candidates = client.search_group_files(gid, job.ssno)
-            item = pick_best_file(candidates, job.ssno, job.kind)
+            item, matched = self._resolve(client, gid, job)
             if item is None:
-                raise RuntimeError(
-                    f"群文件库中未找到 {Lookup(job.kind, job.ssno).label()} 对应的文件")
+                tried = "、".join(entry.label() for entry in (job.plan or [Lookup(job.kind, job.ssno)]))
+                raise RuntimeError(f"非标准文件检索未找到对应的文件（已尝试 {tried}）")
+            LOGGER.info("网关命中 job=%s 依据 %s -> %s", job_id, matched.label(), item.name)
             remote_dir = f"{self.config.baidu_save_dir.rstrip('/')}/gateway/{job_id}"
             safe_name = _safe_filename(item.name, job.ssno)
             artifact = client.fetch_group_file(
@@ -315,6 +356,7 @@ def make_handler(manager: GatewayManager, token: str) -> type[BaseHTTPRequestHan
                     str(payload.get("ssno") or ""),
                     str(payload.get("request_id") or ""),
                     str(payload.get("kind") or "ss"),
+                    payload.get("plan") if isinstance(payload.get("plan"), list) else None,
                 )
                 self._send_json(202, _public_job(job))
             except (ValueError, json.JSONDecodeError) as exc:

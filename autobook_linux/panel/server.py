@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from autobook_linux.panel import (
     PANEL_VERSION, diagnostics, maintenance, nodes, passwords as password_dict, schema, services,
+    tasks as site_tasks,
     sysinfo,
 )
 from autobook_linux.panel.auth import LoginLimiter, PasswordStore, SessionStore
@@ -286,6 +287,13 @@ def make_handler(settings: PanelSettings) -> type[BaseHTTPRequestHandler]:
                 )
             elif path == "/api/activity":
                 self._json({"tasks": maintenance.worker_activity()})
+            elif path == "/api/tasks":
+                query = self._query()
+                self._json(site_tasks.list_tasks(
+                    settings,
+                    status=query.get("status", ""),
+                    limit=int(query.get("limit", "60") or 60),
+                ))
             elif path == "/api/baidu/status":
                 self._json(qr_login.status())
             elif path == "/api/baidu/qr.png":
@@ -371,6 +379,8 @@ def make_handler(settings: PanelSettings) -> type[BaseHTTPRequestHandler]:
                            cookie=self._cookie("", clear=True))
             elif path == "/api/maintenance":
                 self._json(self._maintenance(payload))
+            elif path == "/api/tasks/delete":
+                self._json(self._task_admin(payload))
             elif path == "/api/node/token":
                 node_tokens.rotate()
                 self._json({"ok": True, "message": "已生成新的接入令牌，旧接入码立即失效",
@@ -762,6 +772,21 @@ def make_handler(settings: PanelSettings) -> type[BaseHTTPRequestHandler]:
             username = str(payload.get("username", "") or passwords.username())
             new_password = str(payload.get("new_password", ""))
             passwords.set_credentials(username, new_password)
+
+        def _task_admin(self, payload: dict[str, Any]) -> dict[str, Any]:
+            """Delete or clear site tasks; only the gateway node may do this."""
+            if not settings.has_role("gateway"):
+                raise PanelError("只有网关主服务器可以删除任务")
+            operation = str(payload.get("op", ""))
+            if operation == "clear":
+                statuses = [int(one) for one in payload.get("statuses") or []]
+                removed = site_tasks.clear_tasks(settings, statuses)
+            elif operation == "delete":
+                removed = site_tasks.delete_tasks(
+                    settings, [int(one) for one in payload.get("ids") or []])
+            else:
+                raise PanelError("未知的任务操作")
+            return {"ok": True, "removed": removed, "message": f"已删除 {removed} 个任务"}
 
         def _maintenance(self, payload: dict[str, Any]) -> dict[str, Any]:
             action = str(payload.get("action", ""))

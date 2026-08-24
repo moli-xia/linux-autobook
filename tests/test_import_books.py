@@ -74,7 +74,12 @@ class IntroTests(unittest.TestCase):
         self.assertIn("【ISBN】：9787511582447", intro)
         self.assertIn("【SS码】：12345678", intro)
         self.assertIn("EPUB", intro)
-        self.assertIn("百度网盘群文件库", intro)
+        self.assertIn("【来源】：非标准文件检索", intro)
+
+    def test_the_source_never_names_the_upstream_service(self) -> None:
+        intro = site_intro(row("某书", ss="12345678"))
+        self.assertNotIn("百度", intro)
+        self.assertNotIn("网盘", intro)
 
     def test_intro_omits_absent_identifiers(self) -> None:
         intro = site_intro(row("某书"))

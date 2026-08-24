@@ -64,13 +64,22 @@ class BaiduGatewayClient:
         return self._json("GET", "/health")
 
     def fetch(
-        self, ssno: str, request_id: str, target_dir: Path, kind: str = "ss"
+        self,
+        ssno: str,
+        request_id: str,
+        target_dir: Path,
+        kind: str = "ss",
+        plan: list[dict[str, str]] | None = None,
     ) -> tuple[Path, str]:
-        """Submit/reuse a gateway job, wait for it, then atomically download it."""
-        job = self._json(
-            "POST", "/v1/fetch",
-            json={"ssno": ssno, "request_id": request_id, "kind": kind},
-        )
+        """Submit/reuse a gateway job, wait for it, then atomically download it.
+
+        ``plan`` carries every other key the task holds, so the gateway can fall
+        back from an SS number that finds nothing to the book's title.
+        """
+        payload: dict[str, Any] = {"ssno": ssno, "request_id": request_id, "kind": kind}
+        if plan:
+            payload["plan"] = plan
+        job = self._json("POST", "/v1/fetch", json=payload)
         job_id = str(job.get("job_id") or "")
         if not job_id:
             raise GatewayError("下载网关没有返回 job_id")

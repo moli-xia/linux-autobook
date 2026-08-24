@@ -6,7 +6,9 @@ class doc_delivery_control extends base_control {
     private $billing_columns_ready = false;
     private $ocr_setting_cache = null;
     private $ocr_columns_ready = false;
+    private $result_columns_ready = false;
     private $lease_columns_ready = false;
+    private $execution_mode_ready = false;
 
     private function json_out($status, $message = '', $data = array()) {
         header('Content-Type: application/json; charset=utf-8');
@@ -467,6 +469,21 @@ class doc_delivery_control extends base_control {
         $this->ocr_columns_ready = true;
     }
 
+    private function ensure_result_columns() {
+        if($this->result_columns_ready) return;
+        $table = $_ENV['_config']['db']['master']['tablepre'].'document_delivery_task';
+        // Older installations may have the original task table without the
+        // local-result and completion fields.  Keep the migration idempotent
+        // so the personal callback can save results before issuing UPDATE.
+        $this->add_column_once($table, 'result_url', "result_url varchar(600) NOT NULL DEFAULT '' COMMENT '网盘链接'");
+        $this->add_column_once($table, 'result_file', "result_file varchar(600) NOT NULL DEFAULT '' COMMENT '本机文件'");
+        $this->add_column_once($table, 'message', "message varchar(600) NOT NULL DEFAULT '' COMMENT '状态消息'");
+        $this->add_column_once($table, 'started_at', "started_at int(10) unsigned NOT NULL DEFAULT '0' COMMENT '开始时间'");
+        $this->add_column_once($table, 'finished_at', "finished_at int(10) unsigned NOT NULL DEFAULT '0' COMMENT '完成时间'");
+        $this->add_column_once($table, 'raw_output', "raw_output mediumtext COMMENT 'worker输出'");
+        $this->result_columns_ready = true;
+    }
+
     private function ensure_lease_columns() {
         if($this->lease_columns_ready) return;
         $table = $_ENV['_config']['db']['master']['tablepre'].'document_delivery_task';
@@ -474,6 +491,13 @@ class doc_delivery_control extends base_control {
         $this->add_column_once($table, 'lease_until', "lease_until int(10) unsigned NOT NULL DEFAULT '0' COMMENT '租约到期时间'");
         $this->add_column_once($table, 'heartbeat_at', "heartbeat_at int(10) unsigned NOT NULL DEFAULT '0' COMMENT '最近心跳时间'");
         $this->lease_columns_ready = true;
+    }
+
+    private function ensure_execution_mode_column() {
+        if($this->execution_mode_ready) return;
+        $table = $_ENV['_config']['db']['master']['tablepre'].'document_delivery_task';
+        $this->add_column_once($table, 'execution_mode', "execution_mode varchar(16) NOT NULL DEFAULT 'queue' COMMENT 'queue公共队列或local账户客户端'");
+        $this->execution_mode_ready = true;
     }
 
     private function lease_seconds() {
@@ -589,6 +613,7 @@ class doc_delivery_control extends base_control {
         if(empty($setting['enable'])) $this->json_out(0, '文献传递暂未开放');
         if(empty($this->_uid)) $this->json_out(0, '请登录后再提交文献传递');
 
+        $this->ensure_result_columns();
         $uid = (int)$this->_uid;
         $cid = (int)R('cid', 'R');
         $book_id = (int)R('id', 'R');
@@ -599,19 +624,15 @@ class doc_delivery_control extends base_control {
         $book_title = $this->pick_book_title($book, $post_title);
         if($book_title === '') $this->json_out(0, '缺少书名，无法创建任务');
 
-        $submitted_email = $this->normalize_email(R('email', 'R'));
-        $delivery_mode = 'email';
+        // The Windows account worker keeps the finished PDF locally.  Personal
+        // requests therefore use page delivery and never require or send an
+        // email; the legacy public form may still submit an email field.
         $email = '';
-        if($delivery_mode === 'email') {
-            $email = $submitted_email;
-            if($email === '' && $uid) $email = $this->user_email($uid);
-            if($email === '') $this->json_out(0, '请填写接收邮箱，提交后可关闭页面；若未关闭页面，完成后仍会显示网盘链接。');
-            if(!check::check_email($email)) $this->json_out(0, '邮箱格式不正确');
-        }
         $output_formats = $this->requested_output_formats();
         $output_format = $this->primary_output_format($output_formats);
         $output_formats_csv = $this->output_formats_csv($output_formats);
         $this->ensure_ocr_columns();
+        $this->ensure_execution_mode_column();
 
         $ssno = $this->clean_text(R('ssno', 'R'), 32);
         if($ssno === '' && $book) $ssno = $this->detect_ssno($book);
@@ -626,14 +647,6 @@ class doc_delivery_control extends base_control {
 
         $duplicate = $this->document_delivery_task->find_active_duplicate($uid, $ip, $cid, $book_id, $book_title, $output_formats_csv);
         if($duplicate) {
-            if(!isset($duplicate['email']) || $this->normalize_email($duplicate['email']) !== $email) {
-                $this->document_delivery_task->update(array(
-                    'id' => $duplicate['id'],
-                    'email' => $email,
-                    'updated_at' => $_ENV['_time'],
-                ));
-                $duplicate['email'] = $email;
-            }
             $this->build_task_response($duplicate, '已有相同任务在队列中');
         }
 
@@ -668,6 +681,7 @@ class doc_delivery_control extends base_control {
             'output_formats' => $output_formats_csv,
             'ocr_cost' => isset($ocrBilling['cost']) ? (int)$ocrBilling['cost'] : 0,
             'ocr_billing_type' => isset($ocrBilling['type']) ? $ocrBilling['type'] : '',
+            'execution_mode' => 'queue',
             'message' => $baseMessage,
             'dateline' => $now,
             'updated_at' => $now,
@@ -707,6 +721,7 @@ class doc_delivery_control extends base_control {
     }
 
     public function status() {
+        $this->ensure_result_columns();
         $token = trim((string)R('token', 'R'));
         $id = (int)R('id', 'R');
         if($token === '' && !$id) {
@@ -720,6 +735,7 @@ class doc_delivery_control extends base_control {
     }
 
     public function sendmail() {
+        $this->ensure_result_columns();
         $setting = $this->setting();
         if(!email::available($this->_cfg, 'doc_delivery')) $this->json_out(0, '邮件发送功能未开启');
         $token = trim((string)R('token', 'R'));
@@ -746,9 +762,11 @@ class doc_delivery_control extends base_control {
     public function claim() {
         if(!$this->auth_worker()) $this->json_out(0, 'worker token 不正确');
         $setting = $this->setting();
+        $this->ensure_result_columns();
         $this->ensure_billing_columns();
         $this->ensure_ocr_columns();
         $this->ensure_lease_columns();
+        $this->ensure_execution_mode_column();
         $timeout = max(10, (int)$setting['task_timeout_minutes']) * 60;
         $ocrSetting = $this->ocr_setting();
         $ocrTimeout = max(
@@ -887,6 +905,91 @@ class doc_delivery_control extends base_control {
         $this->json_out(1, 'updated');
     }
 
+    /**
+     * List recent tasks for the management panel.
+     *
+     * Reports which worker holds each task so an operator can see, at a
+     * glance, which server is working on which book.
+     */
+    public function tasklist() {
+        if(!$this->auth_worker()) $this->json_out(0, 'worker token 不正确');
+        $this->ensure_lease_columns();
+        $limit = (int)R('limit', 'P');
+        if($limit < 1 || $limit > 200) $limit = 60;
+        $where = array();
+        $status = trim((string)R('status', 'P'));
+        if($status !== '') {
+            $wanted = array();
+            foreach(explode(',', $status) as $one) {
+                $one = (int)trim($one);
+                if($one >= 1 && $one <= 7) $wanted[] = $one;
+            }
+            if($wanted) $where['status'] = array('IN' => $wanted);
+        }
+        $rows = $this->document_delivery_task->find_fetch($where, array('id' => -1), 0, $limit);
+        $tasks = array();
+        foreach((array)$rows as $row) {
+            $tasks[] = array(
+                'id' => (int)$row['id'],
+                'book_title' => (string)$row['book_title'],
+                'ssno' => (string)$row['ssno'],
+                'keyword' => (string)$row['keyword'],
+                'status' => (int)$row['status'],
+                'status_label' => $this->document_delivery_task->status_label($row['status']),
+                'worker_id' => (string)$row['worker_id'],
+                'message' => (string)$row['message'],
+                'result_url' => (string)$row['result_url'],
+                'dateline' => (int)$row['dateline'],
+                'started_at' => (int)$row['started_at'],
+                'finished_at' => (int)$row['finished_at'],
+                'heartbeat_at' => isset($row['heartbeat_at']) ? (int)$row['heartbeat_at'] : 0,
+                'lease_until' => isset($row['lease_until']) ? (int)$row['lease_until'] : 0,
+                'retry_count' => (int)$row['retry_count'],
+            );
+        }
+        $counts = array();
+        foreach(array(1, 2, 3, 4, 5, 6, 7) as $one) {
+            $counts[$one] = (int)$this->document_delivery_task->find_count(array('status' => $one));
+        }
+        $this->json_out(1, '', array('tasks' => $tasks, 'counts' => $counts, 'now' => $_ENV['_time']));
+    }
+
+    /**
+     * Delete tasks on behalf of the management panel.
+     *
+     * ``op=delete`` removes the listed ids; ``op=clear`` removes everything in
+     * the given statuses.  Clearing refuses to touch running tasks unless it is
+     * asked for them explicitly, so a stray click cannot wipe live work.
+     */
+    public function taskadmin() {
+        if(!$this->auth_worker()) $this->json_out(0, 'worker token 不正确');
+        $op = trim((string)R('op', 'P'));
+        $removed = 0;
+        if($op === 'delete') {
+            $ids = array();
+            foreach(explode(',', (string)R('ids', 'P')) as $one) {
+                $one = (int)trim($one);
+                if($one > 0) $ids[] = $one;
+            }
+            if(!$ids) $this->json_out(0, '没有指定要删除的任务');
+            if(count($ids) > 500) $this->json_out(0, '一次最多删除 500 个任务');
+            // find_delete also drops the rows from the model cache, which a
+            // plain delete loop would leave stale.
+            $removed = (int)$this->document_delivery_task->find_delete(array('id' => array('IN' => $ids)));
+        }elseif($op === 'clear') {
+            $wanted = array();
+            foreach(explode(',', (string)R('status', 'P')) as $one) {
+                $one = (int)trim($one);
+                if($one >= 1 && $one <= 7) $wanted[] = $one;
+            }
+            if(!$wanted) $this->json_out(0, '没有指定要清空的状态');
+            $removed = (int)$this->document_delivery_task->find_delete(array('status' => array('IN' => $wanted)));
+        }else{
+            $this->json_out(0, '未知操作');
+        }
+        $this->json_out(1, '已删除 '.$removed.' 个任务', array('removed' => $removed));
+    }
+
     public function heartbeat() {
         if(!$this->auth_worker()) $this->json_out(0, 'worker token 不正确');
         $this->ensure_lease_columns();
@@ -906,9 +1009,11 @@ class doc_delivery_control extends base_control {
     public function complete() {
         if(!$this->auth_worker()) $this->json_out(0, 'worker token 不正确');
         $setting = $this->setting();
+        $this->ensure_result_columns();
         $this->ensure_billing_columns();
         $this->ensure_ocr_columns();
         $this->ensure_lease_columns();
+        $this->ensure_execution_mode_column();
         $token = trim((string)R('task_token', 'P'));
         if($token === '') $this->json_out(0, '缺少任务令牌');
         $task = $this->get_task_by_token($token);
@@ -1000,6 +1105,81 @@ class doc_delivery_control extends base_control {
             $this->document_delivery_task->update(array(
                 'id' => $task['id'],
                 'message' => $message,
+                'updated_at' => $_ENV['_time'],
+            ));
+        }
+        $task = $this->get_task_by_token($token);
+        $this->build_task_response($task, 'saved');
+    }
+
+    /**
+     * Complete a task created by the currently logged-in user.
+     *
+     * The desktop client deliberately does not claim the shared worker queue,
+     * so it has no worker lease.  This endpoint is session-authenticated and
+     * only accepts a task whose uid matches the current account.
+     */
+    public function personal() {
+        if(empty($this->_uid)) $this->json_out(0, '请先登录');
+        $this->ensure_result_columns();
+        $this->ensure_billing_columns();
+        $this->ensure_ocr_columns();
+        $this->ensure_lease_columns();
+        $this->ensure_execution_mode_column();
+        $token = trim((string)R('task_token', 'P'));
+        if($token === '') $this->json_out(0, '缺少任务令牌');
+        $task = $this->get_task_by_token($token);
+        if(empty($task)) $this->json_out(0, '任务不存在');
+        if((int)$task['uid'] !== (int)$this->_uid) $this->json_out(0, '无权操作此任务');
+        if((int)$task['status'] === 3) $this->build_task_response($task, '任务已经完成');
+        if((int)$task['status'] === 4) $this->json_out(0, '任务已经失败，请重新提交');
+        if(!in_array((int)$task['status'], array(1, 2, 6, 7))) $this->json_out(0, '任务当前状态不可回传');
+
+        $workerStatus = trim((string)R('worker_status', 'P'));
+        $resultFile = $this->clean_text(R('result_file', 'P'), 255);
+        $rawOutput = trim((string)R('raw_output', 'P'));
+        if(strlen($rawOutput) > 60000) $rawOutput = substr($rawOutput, -60000);
+        $message = $this->sanitize_worker_message((string)R('message', 'P'), $rawOutput);
+        $status = $workerStatus === 'completed' ? 3 : 4;
+        if($message === '') $message = $status === 3 ? '文献传递完成，PDF 已保存到本机。' : '文献传递失败，请稍后重试。';
+
+        $update = array(
+            'id' => $task['id'],
+            'status' => $status,
+            'result_url' => '',
+            'result_file' => $resultFile,
+            'message' => $message,
+            'raw_output' => $rawOutput,
+            'updated_at' => $_ENV['_time'],
+            'finished_at' => $_ENV['_time'],
+            'lease_id' => '',
+            'lease_until' => 0,
+            'heartbeat_at' => 0,
+        );
+        $saved = $this->document_delivery_task->update($update);
+        if($saved !== 1) {
+            // A concurrent public worker may have committed the same final
+            // state after the task was read.  Verify the row before reporting
+            // a false save failure to the desktop client.
+            $current = $this->get_task_by_token($token);
+            $same_result = !empty($current)
+                && (int)$current['status'] === $status
+                && (string)$current['result_file'] === (string)$resultFile;
+            if(!$same_result) $this->json_out(0, '保存任务结果失败');
+        }
+
+        if($status === 4) {
+            $task['result_url'] = '';
+            $task['result_file'] = $resultFile;
+            $task['message'] = $message;
+            $message = $this->refund_billing_if_needed($task, $message);
+            $task['message'] = $message;
+            $message = $this->refund_ocr_billing_if_needed($task, $message);
+            $this->document_delivery_task->update(array('id' => $task['id'], 'message' => $message, 'updated_at' => $_ENV['_time']));
+        }else{
+            $this->document_delivery_task->update(array(
+                'id' => $task['id'],
+                'message' => $this->append_task_message($message, '结果文件保存在提交任务的 Windows 电脑上。'),
                 'updated_at' => $_ENV['_time'],
             ));
         }

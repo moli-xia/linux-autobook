@@ -41,6 +41,11 @@ LOGGER = logging.getLogger(__name__)
 # The signature material is stable for a while; refetching it per download
 # would double the request count for no benefit.
 SIGN_CACHE_SECONDS = 300
+# The group search answers the same query inconsistently - measured at roughly
+# one empty response in two - so an empty result is retried before it is taken
+# at face value.  Three attempts turn a 50% hit rate into about 88%.
+SEARCH_EMPTY_RETRIES = 4
+SEARCH_RETRY_DELAY = 0.6
 # A transfer + download rarely exceeds minutes; anything this old in the inbox
 # is a leftover, not a file some running task still needs.
 INBOX_ORPHAN_HOURS = 6
@@ -216,15 +221,33 @@ class BaiduPanClient:
         digest_hex = hashlib.md5(source).hexdigest().encode("ascii")
         return base64.b64encode(digest_hex).decode("ascii")
 
-    def search_group_files(self, gid: str, keyword: str) -> list[GroupShareFile]:
+    def search_group_files(
+        self, gid: str, keyword: str, retries: int = SEARCH_EMPTY_RETRIES
+    ) -> list[GroupShareFile]:
         """Search the server-side group library without crawling its folders.
 
         Baidu's public OpenAPI does not document this endpoint, but the desktop
         client uses it for the fast search box in a group file library.
+
+        The endpoint is not consistent: repeating one identical query returns
+        results about half the time and an empty list the rest, apparently
+        depending on which replica answers.  An empty answer is therefore
+        retried before it is believed, otherwise every other task would fail
+        for a book that is plainly there.
         """
         keyword = str(keyword).strip()
         if not keyword:
             return []
+        for attempt in range(max(1, retries)):
+            matches = self._search_group_once(gid, keyword)
+            if matches:
+                return matches
+            if attempt + 1 < max(1, retries):
+                time.sleep(SEARCH_RETRY_DELAY)
+        LOGGER.debug("群搜索 %r 连续 %d 次为空", keyword, max(1, retries))
+        return []
+
+    def _search_group_once(self, gid: str, keyword: str) -> list[GroupShareFile]:
         vuk = self._my_uk()
         data = self._get(
             "/basembox/group/multisearch",
