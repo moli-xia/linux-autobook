@@ -63,7 +63,10 @@ class doc_delivery_control extends base_control {
     private function task_email($task) {
         $email = isset($task['email']) ? $this->normalize_email($task['email']) : '';
         if($email !== '' && check::check_email($email)) return $email;
-        return '';
+        // Tasks created before the account address was recorded carry no email
+        // of their own; the owner's account still has one, and that is where
+        // the link should go.
+        return $this->user_email(isset($task['uid']) ? $task['uid'] : 0);
     }
 
     private function append_task_message($message, $append) {
@@ -624,10 +627,19 @@ class doc_delivery_control extends base_control {
         $book_title = $this->pick_book_title($book, $post_title);
         if($book_title === '') $this->json_out(0, '缺少书名，无法创建任务');
 
-        // The Windows account worker keeps the finished PDF locally.  Personal
-        // requests therefore use page delivery and never require or send an
-        // email; the legacy public form may still submit an email field.
+        // The result is a share link now, not a file left on the worker's own
+        // disk, so it can be mailed.  Prefer an address the reader typed, fall
+        // back to the one on their account, and record it on the task so the
+        // completion callback knows where to send the link.
         $email = '';
+        if(!empty($setting['enable_email'])) {
+            $submitted = $this->normalize_email(R('email', 'R'));
+            if($submitted !== '' && check::check_email($submitted)) {
+                $email = $submitted;
+            }else{
+                $email = $this->user_email($uid);
+            }
+        }
         $output_formats = $this->requested_output_formats();
         $output_format = $this->primary_output_format($output_formats);
         $output_formats_csv = $this->output_formats_csv($output_formats);
@@ -1085,7 +1097,9 @@ class doc_delivery_control extends base_control {
         }
 
         $recipientEmail = $this->task_email($task);
-        if($status == 3 && $recipientEmail !== '') {
+        // 后台「自动邮件」开关决定是否在任务完成时自动发信；关闭时仍可在前台手动发送。
+        $autoMail = !empty($setting['enable_email']) && email::available($this->_cfg, 'doc_delivery');
+        if($status == 3 && $recipientEmail !== '' && $autoMail) {
             $task['result_url'] = $result_url;
             $task['result_file'] = $result_file;
             $sent = $this->send_link_email($task, $recipientEmail);
@@ -1101,12 +1115,25 @@ class doc_delivery_control extends base_control {
                 'updated_at' => $_ENV['_time'],
             ));
         }elseif($status == 3) {
-            $message = $this->append_task_message($message, '未找到接收邮箱，未自动发送邮件。');
-            $this->document_delivery_task->update(array(
+            // Say which of the three reasons applies, so a reader knows whether
+            // to fill in their account email or the site owner has to act.
+            if(empty($setting['enable_email'])) {
+                $reason = '站点未开启邮件发送，请在页面上查看下载链接。';
+            }elseif(!email::available($this->_cfg, 'doc_delivery')) {
+                $reason = '站点邮件服务尚未配置，请在页面上查看下载链接。';
+            }else{
+                $reason = '账号未设置邮箱，未自动发送邮件；可在页面上手动填写邮箱发送。';
+            }
+            $message = $this->append_task_message($message, $reason);
+            $update = array(
                 'id' => $task['id'],
                 'message' => $message,
                 'updated_at' => $_ENV['_time'],
-            ));
+            );
+            // Record the address we resolved even when nothing was sent, so the
+            // manual "发送到邮箱" box on the page starts out filled in.
+            if($recipientEmail !== '') $update['email'] = $recipientEmail;
+            $this->document_delivery_task->update($update);
         }
         $task = $this->get_task_by_token($token);
         $this->build_task_response($task, 'saved');
