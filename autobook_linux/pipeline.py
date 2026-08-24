@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -60,6 +61,11 @@ EBOOK_SUFFIXES = {".epub", ".mobi", ".azw3"}
 # calibre's converter, when the image has it; see _from_ebook.
 EBOOK_CONVERTERS = ("ebook-convert",)
 EBOOK_CONVERT_TIMEOUT = 1800
+# Each conversion starts a headless Chromium worth several hundred megabytes,
+# so running one per task thread will exhaust a small worker. Conversions take
+# seconds, so serialising them costs little.
+EBOOK_CONVERT_SLOTS = max(1, int(os.environ.get("EBOOK_CONVERT_SLOTS", "1")))
+_EBOOK_CONVERT_LOCK = threading.Semaphore(EBOOK_CONVERT_SLOTS)
 
 
 def find_ebook_converter() -> str | None:
@@ -197,11 +203,12 @@ class TaskPipeline:
                 "QTWEBENGINE_CHROMIUM_FLAGS": "--no-sandbox --disable-gpu --disable-dev-shm-usage",
                 "QT_QPA_PLATFORM": "offscreen",
             })
-            result = subprocess.run(
-                [converter, str(downloaded), str(target_pdf)],
-                capture_output=True, text=True, errors="replace",
-                timeout=EBOOK_CONVERT_TIMEOUT, env=environment,
-            )
+            with _EBOOK_CONVERT_LOCK:
+                result = subprocess.run(
+                    [converter, str(downloaded), str(target_pdf)],
+                    capture_output=True, text=True, errors="replace",
+                    timeout=EBOOK_CONVERT_TIMEOUT, env=environment,
+                )
             if result.returncode == 0 and target_pdf.exists() and target_pdf.stat().st_size > 0:
                 return target_pdf
             LOGGER.warning(
