@@ -280,6 +280,11 @@ export DEBIAN_FRONTEND=noninteractive
 if command -v apt-get >/dev/null 2>&1; then
   apt-get update
   apt-get install -y git curl python3 python3-venv python3-pip p7zip-full aria2 openssl ca-certificates
+  # calibre converts EPUB/MOBI/AZW3 to PDF; without the CJK fonts the produced
+  # PDF renders Chinese as empty boxes. Both are large, so a failure here is
+  # tolerated: the worker then delivers the original e-book file instead.
+  apt-get install -y --no-install-recommends calibre fonts-noto-cjk \
+    || echo "WARNING: calibre 安装失败，EPUB 等电子书将直接交付原文件而不转换为 PDF" >&2
   [[ -z "$DOMAIN" ]] || apt-get install -y certbot
 else
   echo "This installer currently supports Debian/Ubuntu (apt-get)." >&2
