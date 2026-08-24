@@ -63,9 +63,14 @@ class BaiduGatewayClient:
     def check(self) -> dict[str, Any]:
         return self._json("GET", "/health")
 
-    def fetch(self, ssno: str, request_id: str, target_dir: Path) -> tuple[Path, str]:
+    def fetch(
+        self, ssno: str, request_id: str, target_dir: Path, kind: str = "ss"
+    ) -> tuple[Path, str]:
         """Submit/reuse a gateway job, wait for it, then atomically download it."""
-        job = self._json("POST", "/v1/fetch", json={"ssno": ssno, "request_id": request_id})
+        job = self._json(
+            "POST", "/v1/fetch",
+            json={"ssno": ssno, "request_id": request_id, "kind": kind},
+        )
         job_id = str(job.get("job_id") or "")
         if not job_id:
             raise GatewayError("下载网关没有返回 job_id")

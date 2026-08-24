@@ -22,6 +22,7 @@ from autobook_linux.baidu_auth import BaiduCredentialStore, resolve_baidu_creden
 from autobook_linux.baidu_pan import BaiduPanClient
 from autobook_linux.config import Config
 from autobook_linux.library_index import pick_best_file
+from autobook_linux.lookup import Lookup, LookupError, validate
 
 LOGGER = logging.getLogger(__name__)
 _SSNO_RE = re.compile(r"^\d{8}$")
@@ -38,6 +39,7 @@ class GatewayJob:
     job_id: str
     request_id: str
     ssno: str
+    kind: str = "ss"
     status: str = "pending"
     filename: str = ""
     artifact: Path | None = None
@@ -95,9 +97,8 @@ class GatewayManager:
         self.root.mkdir(parents=True, exist_ok=True)
         LOGGER.info("百度下载网关预检成功 gid=%s", self._gid)
 
-    def submit(self, ssno: str, request_id: str) -> GatewayJob:
-        if not _SSNO_RE.fullmatch(ssno):
-            raise ValueError("ssno 必须是 8 位数字")
+    def submit(self, ssno: str, request_id: str, kind: str = "ss") -> GatewayJob:
+        lookup = validate(kind, ssno)
         if not _REQUEST_ID_RE.fullmatch(request_id):
             raise ValueError("request_id 格式无效")
         self.cleanup_expired()
@@ -105,12 +106,13 @@ class GatewayManager:
             existing_id = self._requests.get(request_id)
             if existing_id and existing_id in self._jobs:
                 existing = self._jobs[existing_id]
-                if existing.ssno != ssno:
-                    raise ValueError("同一 request_id 不能用于不同 SS 号")
+                if existing.ssno != lookup.value or existing.kind != lookup.kind:
+                    raise ValueError("同一 request_id 不能用于不同的检索条件")
                 existing.updated_at = time.time()
                 return existing
             job_id = uuid.uuid4().hex
-            job = GatewayJob(job_id=job_id, request_id=request_id, ssno=ssno)
+            job = GatewayJob(job_id=job_id, request_id=request_id,
+                             ssno=lookup.value, kind=lookup.kind)
             self._jobs[job_id] = job
             self._requests[request_id] = job_id
             self._executor.submit(self._run_job, job_id)
@@ -133,9 +135,11 @@ class GatewayManager:
             if not gid:
                 gid = client.resolve_gid(self.config.baidu_group_name)
                 self._gid = gid
-            item = pick_best_file(client.search_group_files(gid, job.ssno), job.ssno)
+            candidates = client.search_group_files(gid, job.ssno)
+            item = pick_best_file(candidates, job.ssno, job.kind)
             if item is None:
-                raise RuntimeError(f"群文件库中未找到 SS={job.ssno} 对应的文件")
+                raise RuntimeError(
+                    f"群文件库中未找到 {Lookup(job.kind, job.ssno).label()} 对应的文件")
             remote_dir = f"{self.config.baidu_save_dir.rstrip('/')}/gateway/{job_id}"
             safe_name = _safe_filename(item.name, job.ssno)
             artifact = client.fetch_group_file(
@@ -220,6 +224,7 @@ def _public_job(job: GatewayJob) -> dict[str, Any]:
     return {
         "job_id": job.job_id,
         "ssno": job.ssno,
+        "kind": job.kind,
         "status": job.status,
         "filename": job.filename if job.status == "ready" else "",
         "size": job.size if job.status == "ready" else 0,
@@ -304,7 +309,11 @@ def make_handler(manager: GatewayManager, token: str) -> type[BaseHTTPRequestHan
                 if length <= 0 or length > 16 * 1024:
                     raise ValueError("请求体大小无效")
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
-                job = manager.submit(str(payload.get("ssno") or ""), str(payload.get("request_id") or ""))
+                job = manager.submit(
+                    str(payload.get("ssno") or ""),
+                    str(payload.get("request_id") or ""),
+                    str(payload.get("kind") or "ss"),
+                )
                 self._send_json(202, _public_job(job))
             except (ValueError, json.JSONDecodeError) as exc:
                 self._send_json(400, {"error": str(exc)})

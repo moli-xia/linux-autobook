@@ -42,19 +42,49 @@ CREATE TABLE IF NOT EXISTS sync_state (
 """
 
 
-def pick_best_file(candidates: list[GroupShareFile], ssno: str) -> GroupShareFile | None:
-    """Choose a deterministic best match without requiring a local index."""
+# Formats a reader can open directly, best first; archives still need work.
+READABLE_SUFFIXES = (".pdf", ".epub", ".azw3", ".mobi", ".djvu")
+
+
+def pick_best_file(
+    candidates: list[GroupShareFile], needle: str, kind: str = "ss"
+) -> GroupShareFile | None:
+    """Choose a deterministic best match without requiring a local index.
+
+    For an SS number the filename usually *is* the number, so an exact stem
+    match wins.  For an ISBN or a title the number is only part of the name, so
+    containment is what counts and the tie is broken by format then recency.
+    """
     if not candidates:
         return None
+    needle_lower = (needle or "").lower()
 
     def score(item: GroupShareFile) -> tuple[int, int, int]:
-        stem = item.name.rsplit(".", 1)[0] if "." in item.name else item.name
-        exact_rank = 0 if stem == ssno else 1
-        suffix = item.name.rsplit(".", 1)[-1].lower() if "." in item.name else ""
-        type_rank = 0 if suffix == "pdf" else (1 if f".{suffix}" in ARCHIVE_SUFFIXES else 2)
-        return (type_rank, exact_rank, -item.server_mtime)
+        name = item.name
+        stem = name.rsplit(".", 1)[0] if "." in name else name
+        suffix = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
+        if suffix == ".pdf":
+            type_rank = 0
+        elif suffix in READABLE_SUFFIXES:
+            type_rank = 1
+        elif suffix in ARCHIVE_SUFFIXES:
+            type_rank = 2
+        else:
+            type_rank = 3
+        if kind == "ss":
+            # Every candidate already matches the SS number, so prefer a file
+            # that needs no unpacking over one merely named after the code.
+            exact_rank = 0 if stem == needle else 1
+            return (type_rank, exact_rank, -item.server_mtime)
+        # An ISBN or title search can return unrelated files, so a name that
+        # actually contains the needle outranks a convenient format.
+        match_rank = 0 if needle_lower in name.lower() else 1
+        return (match_rank, type_rank, -item.server_mtime)
 
-    return sorted(candidates, key=score)[0]
+    best = sorted(candidates, key=score)[0]
+    if kind != "ss" and needle_lower not in best.name.lower():
+        return None
+    return best
 
 
 class LibraryIndex:
@@ -216,11 +246,11 @@ class LibraryIndex:
         return count
 
     # ------------------------------------------------------------------
-    def pick_best(self, gid: str, ssno: str) -> GroupShareFile | None:
-        """Choose the best matching file for an SS code.
+    def pick_best(self, gid: str, needle: str, kind: str = "ss") -> GroupShareFile | None:
+        """Choose the best matching file for an SS code, ISBN or title.
 
-        Preference: PDF > archive, then exact stem match, then newest first.
-        This avoids downloading and converting an archive when the group
-        search already returned a ready-to-use PDF for the same SS code.
+        Preference: a matching name first, then PDF > other readable formats >
+        archive, then newest first.  This avoids downloading and converting an
+        archive when the group search already returned a ready-to-use file.
         """
-        return pick_best_file(self.search(gid, ssno), ssno)
+        return pick_best_file(self.search(gid, needle), needle, kind)

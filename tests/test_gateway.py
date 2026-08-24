@@ -34,9 +34,10 @@ class _ReadyManager:
     def stats(self):
         return {"pending": 0, "running": 0, "ready": 1, "failed": 0}
 
-    def submit(self, ssno, request_id):
+    def submit(self, ssno, request_id, kind="ss"):
         if ssno != self.job.ssno or request_id != self.job.request_id:
             raise ValueError("unexpected request")
+        self.last_kind = kind
         return self.job
 
     def get(self, job_id):

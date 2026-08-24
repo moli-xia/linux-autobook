@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -23,6 +24,8 @@ from autobook_linux.baidu_pan import BaiduPanClient
 from autobook_linux.config import Config
 from autobook_linux.gateway_client import BaiduGatewayClient
 from autobook_linux.library_index import LibraryIndex
+from autobook_linux.lookup import Lookup, LookupError
+from autobook_linux.lookup import from_task as lookup_from_task
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "vendor"))
 from pdg2pdf import PdgConverter  # noqa: E402  (vendored, MIT, bj5/pdg2pdf_open)
@@ -48,6 +51,28 @@ def extract_ssno(task: dict) -> str:
         if match:
             return match.group(1)
     return ""
+
+
+# Formats a reader can already open. The netdisk holds thousands of these,
+# mostly EPUB, and refusing them would make those books undeliverable.
+EBOOK_SUFFIXES = {".epub", ".mobi", ".azw3"}
+# calibre's converter, when the image has it; see _from_ebook.
+EBOOK_CONVERTERS = ("ebook-convert",)
+EBOOK_CONVERT_TIMEOUT = 1800
+
+
+def find_ebook_converter() -> str | None:
+    for name in EBOOK_CONVERTERS:
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+
+def _slug(value: str) -> str:
+    """Short, filesystem-safe stand-in for an SS number in directory names."""
+    cleaned = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "-", value or "").strip("-")
+    return (cleaned[:40] or "book")
 
 
 def sanitize_filename(value: str) -> str:
@@ -94,27 +119,33 @@ class TaskPipeline:
     def process(self, task: dict, progress_cb=lambda msg: None) -> dict:
         """Run one task end to end. Returns {"share_url":..., "pdf": Path}."""
         task_id = task.get("id")
-        ssno = extract_ssno(task)
         book_title = str(task.get("book_title") or task.get("keyword") or "")
-        if not ssno:
-            raise PipelineError("任务缺少 SS 号，无法处理")
+        try:
+            lookup = lookup_from_task(task)
+        except LookupError as exc:
+            raise PipelineError(str(exc)) from exc
+        # Books imported from the netdisk catalogue often have no SS number;
+        # the slug only names the working directory.
+        ssno = lookup.value if lookup.kind == "ss" else ""
+        slug = lookup.value if lookup.kind == "ss" else _slug(lookup.value)
 
-        job_dir = self.config.work_root / f"task_{task_id}_{ssno}"
-        dl_dir = self.config.download_root / f"task_{task_id}_{ssno}"
+        job_dir = self.config.work_root / f"task_{task_id}_{slug}"
+        dl_dir = self.config.download_root / f"task_{task_id}_{slug}"
         job_dir.mkdir(parents=True, exist_ok=True)
         dl_dir.mkdir(parents=True, exist_ok=True)
         try:
             if self.gateway is not None:
-                progress_cb(f"正在通过百度下载网关检索并下载 SS={ssno}")
-                request_id = f"task-{task_id}-{task.get('lease_id') or task.get('token') or ssno}"
-                downloaded, source_name = self.gateway.fetch(ssno, request_id, dl_dir)
+                progress_cb(f"正在通过百度下载网关检索并下载 {lookup.label()}")
+                request_id = f"task-{task_id}-{task.get('lease_id') or task.get('token') or slug}"
+                downloaded, source_name = self.gateway.fetch(
+                    lookup.value, request_id, dl_dir, lookup.kind)
                 LOGGER.info("网关下载完成: %s", source_name)
             else:
-                progress_cb(f"正在群文件库检索 SS={ssno}")
+                progress_cb(f"正在群文件库检索 {lookup.label()}")
                 assert self.index is not None and self.baidu is not None
-                item = self.index.pick_best(self.gid, ssno)
+                item = self.index.pick_best(self.gid, lookup.value, lookup.kind)
                 if item is None:
-                    raise PipelineError(f"群文件库中未找到 SS={ssno} 对应的文件")
+                    raise PipelineError(f"群文件库中未找到 {lookup.label()} 对应的文件")
                 LOGGER.info("选中群文件: %s (size=%d msg_id=%s)", item.name, item.size, item.msg_id)
                 progress_cb(f"转存并下载 {item.name}")
                 downloaded = self.baidu.fetch_group_file(
@@ -125,7 +156,7 @@ class TaskPipeline:
                 source_name = item.name
 
             progress_cb("生成 PDF")
-            pdf_path = self._to_pdf(downloaded, job_dir, ssno, book_title)
+            pdf_path = self._to_pdf(downloaded, job_dir, slug, book_title)
 
             progress_cb("上传到网盘并创建分享链接")
             result = drive_upload_file(
@@ -142,6 +173,35 @@ class TaskPipeline:
             shutil.rmtree(dl_dir, ignore_errors=True)
 
     # ------------------------------------------------------------------
+    def _from_ebook(self, downloaded: Path, job_dir: Path, target_pdf: Path) -> Path:
+        """Convert EPUB/MOBI/AZW3 to PDF, or deliver the original if we cannot.
+
+        Converting needs calibre's ebook-convert, which is not in the base
+        image.  Delivering the original file is a far better outcome than
+        failing the task: the reader still gets the book.
+        """
+        converter = find_ebook_converter()
+        if converter:
+            LOGGER.info("使用 %s 转换 %s", Path(converter).name, downloaded.name)
+            result = subprocess.run(
+                [converter, str(downloaded), str(target_pdf)],
+                capture_output=True, text=True, errors="replace",
+                timeout=EBOOK_CONVERT_TIMEOUT,
+            )
+            if result.returncode == 0 and target_pdf.exists() and target_pdf.stat().st_size > 0:
+                return target_pdf
+            LOGGER.warning(
+                "电子书转换失败（退出码 %s），改为直接交付原文件: %s",
+                result.returncode, (result.stderr or result.stdout or "")[-300:],
+            )
+            target_pdf.unlink(missing_ok=True)
+        else:
+            LOGGER.info("未安装 ebook-convert，直接交付原始 %s 文件", downloaded.suffix)
+
+        delivered = job_dir / sanitize_filename(downloaded.name)
+        shutil.copy2(downloaded, delivered)
+        return delivered
+
     def _to_pdf(self, downloaded: Path, job_dir: Path, ssno: str, book_title: str) -> Path:
         suffix = downloaded.suffix.lower()
         target_name = preferred_pdf_name(book_title, ssno, downloaded.stem)
@@ -150,6 +210,9 @@ class TaskPipeline:
         if suffix == ".pdf":
             shutil.copy2(downloaded, target_pdf)
             return target_pdf
+
+        if suffix in EBOOK_SUFFIXES:
+            return self._from_ebook(downloaded, job_dir, target_pdf)
 
         if suffix not in ARCHIVE_SUFFIXES and not looks_like_archive(downloaded):
             raise PipelineError(f"暂不支持的文件类型: {downloaded.name}")
