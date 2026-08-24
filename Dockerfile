@@ -23,6 +23,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # p7zip-full and aria2 are the two external commands the pipeline shells out to;
 # openssl generates the self-signed certificates on first boot.
+# Debian's p7zip-full is upstream 7-Zip 26.x, whose Rar/Rar5 handlers are built
+# in, so the non-free p7zip-rar codec is not needed.
+# calibre supplies ebook-convert for EPUB/MOBI/AZW3 -> PDF. It is most of the
+# image size, and fonts-noto-cjk is what keeps Chinese text from rendering as
+# empty boxes in the produced PDF.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         p7zip-full \
@@ -32,6 +37,8 @@ RUN apt-get update \
         curl \
         tzdata \
         procps \
+        calibre \
+        fonts-noto-cjk \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/autobook-linux

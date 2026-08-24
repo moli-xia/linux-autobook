@@ -11,7 +11,9 @@ e.g. PeterDing/BaiduPCS-Py issue #73 and common mbox tooling):
   GET  /mbox/msg/shareinfo                       -> files inside one share message
   POST /mbox/msg/transfer                        -> save share files to own drive
   GET  /api/list                                 -> list own drive directory
-  GET  /api/filemetas?dlink=1                    -> download links of own files
+  GET  /api/gettemplatevariable                  -> download signature material
+  GET  /api/download?sign=..&timestamp=..        -> signed dlink for own files
+  GET  /api/filemetas?dlink=1                    -> unsigned dlink (fallback only)
   POST /api/filemanager?opera=delete             -> remove temp files
   POST /api/sharedownload                        -> direct group-file dlink (fallback)
 
@@ -35,6 +37,34 @@ from urllib.parse import quote, unquote
 import requests
 
 LOGGER = logging.getLogger(__name__)
+
+# The signature material is stable for a while; refetching it per download
+# would double the request count for no benefit.
+SIGN_CACHE_SECONDS = 300
+
+
+def calculate_download_sign(sign1: str, sign3: str) -> str:
+    """Sign a download request the way the pan.baidu.com web client does.
+
+    An RC4-style keystream derived from sign3 is XORed over sign1 and the
+    result is base64-encoded.  Without it the CDN rejects the link with
+    error_code 31362 "sign error".
+    """
+    box = list(range(256))
+    key = [ord(sign3[index % len(sign3)]) for index in range(256)] if sign3 else [0] * 256
+    swap = 0
+    for index in range(256):
+        swap = (swap + box[index] + key[index]) % 256
+        box[index], box[swap] = box[swap], box[index]
+    out = []
+    i = swap = 0
+    for char in sign1:
+        i = (i + 1) % 256
+        swap = (swap + box[i]) % 256
+        box[i], box[swap] = box[swap], box[i]
+        out.append(chr(ord(char) ^ box[(box[i] + box[swap]) % 256]))
+    return base64.b64encode("".join(out).encode("latin-1")).decode("ascii")
+
 
 WEB_PARAMS = {"channel": "chunlei", "web": 1, "app_id": 250528, "clienttype": 0}
 GROUP_SEARCH_SALT = "D3BA5E6D3B16D9202E10DE5D662CFC15"
@@ -91,6 +121,7 @@ class BaiduPanClient:
                 self.session.cookies.set(key, value, domain=".baidu.com")
         self._bdstoken: str | None = None
         self._uk: str | None = None
+        self._sign_cache: tuple[float, tuple[str, str, str]] | None = None
 
     # ------------------------------------------------------------------
     # low level helpers
@@ -350,7 +381,58 @@ class BaiduPanClient:
     def _stem_of(filename: str) -> str:
         return filename.rsplit(".", 1)[0] if "." in filename else filename
 
+    def _sign_material(self) -> tuple[str, str, str]:
+        """Fetch (and briefly cache) the values the download signature needs."""
+        now = time.time()
+        if self._sign_cache and now - self._sign_cache[0] < SIGN_CACHE_SECONDS:
+            return self._sign_cache[1]
+        data = self._get(
+            "/api/gettemplatevariable",
+            {"fields": json.dumps(["sign1", "sign3", "timestamp"])},
+        )
+        if data.get("errno") != 0:
+            raise RuntimeError(f"gettemplatevariable 失败: errno={data.get('errno')}")
+        result = data.get("result") or {}
+        material = (
+            str(result.get("sign1") or ""),
+            str(result.get("sign3") or ""),
+            str(result.get("timestamp") or ""),
+        )
+        if not all(material):
+            raise RuntimeError("gettemplatevariable 未返回完整的签名素材")
+        self._sign_cache = (now, material)
+        return material
+
     def get_download_link(self, fs_id: int) -> str:
+        """Signed download link for a file in our own drive.
+
+        The dlink that /api/filemetas returns is unsigned: the CDN answers it
+        with HTTP 403 {"error_code":31362,"error_msg":"sign error"}.  The web
+        client instead signs a request to /api/download, which is what this
+        does.  filemetas is kept as a fallback in case the signing endpoint
+        changes shape again.
+        """
+        try:
+            sign1, sign3, timestamp = self._sign_material()
+            data = self._get("/api/download", {
+                "sign": calculate_download_sign(sign1, sign3),
+                "timestamp": timestamp,
+                "fidlist": f"[{fs_id}]",
+                "type": "dlink",
+                "web": 1,
+                "app_id": 250528,
+                "channel": "chunlei",
+                "clienttype": 0,
+            })
+            if data.get("errno") == 0:
+                entries = data.get("dlink") or []
+                if entries and entries[0].get("dlink"):
+                    return str(entries[0]["dlink"])
+            LOGGER.warning("签名下载接口未返回直链 fs_id=%s errno=%s", fs_id, data.get("errno"))
+        except Exception as exc:
+            LOGGER.warning("获取签名直链失败 fs_id=%s: %s", fs_id, exc)
+            self._sign_cache = None
+
         data = self._get("/api/filemetas", {"fsids": f"[{fs_id}]", "dlink": 1})
         if data.get("errno") != 0 or not data.get("info"):
             raise RuntimeError(f"filemetas 失败 fs_id={fs_id}: {data}")

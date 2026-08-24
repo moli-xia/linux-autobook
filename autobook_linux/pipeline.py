@@ -7,6 +7,7 @@ concurrently on a headless Linux server.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -176,17 +177,30 @@ class TaskPipeline:
     def _from_ebook(self, downloaded: Path, job_dir: Path, target_pdf: Path) -> Path:
         """Convert EPUB/MOBI/AZW3 to PDF, or deliver the original if we cannot.
 
-        Converting needs calibre's ebook-convert, which is not in the base
-        image.  Delivering the original file is a far better outcome than
-        failing the task: the reader still gets the book.
+        Conversion needs calibre's ebook-convert (in the image) plus CJK fonts,
+        without which Chinese renders as empty boxes.  When the converter is
+        missing or fails, delivering the original file is a far better outcome
+        than failing the task: the reader still gets the book.
         """
         converter = find_ebook_converter()
         if converter:
             LOGGER.info("使用 %s 转换 %s", Path(converter).name, downloaded.name)
+            # calibre renders PDF through a headless Chromium, which refuses to
+            # start as root without --no-sandbox, and it needs a writable HOME
+            # for its config directory.
+            calibre_home = job_dir / ".calibre"
+            calibre_home.mkdir(parents=True, exist_ok=True)
+            environment = dict(os.environ)
+            environment.update({
+                "HOME": str(calibre_home),
+                "CALIBRE_CONFIG_DIRECTORY": str(calibre_home / "config"),
+                "QTWEBENGINE_CHROMIUM_FLAGS": "--no-sandbox --disable-gpu --disable-dev-shm-usage",
+                "QT_QPA_PLATFORM": "offscreen",
+            })
             result = subprocess.run(
                 [converter, str(downloaded), str(target_pdf)],
                 capture_output=True, text=True, errors="replace",
-                timeout=EBOOK_CONVERT_TIMEOUT,
+                timeout=EBOOK_CONVERT_TIMEOUT, env=environment,
             )
             if result.returncode == 0 and target_pdf.exists() and target_pdf.stat().st_size > 0:
                 return target_pdf
