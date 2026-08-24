@@ -106,8 +106,13 @@ class FakePan(BaiduPanClient):
     def list_dir(self, path):
         return self.entries
 
+    accepts_deletes = True
+
     def delete_own_files(self, paths):
+        if not self.accepts_deletes:
+            return False
         self.deleted.extend(paths)
+        return True
 
 
 def inbox_entry(name, hours_ago, size=1024, isdir=False):
@@ -169,6 +174,17 @@ class InboxSweepTests(unittest.TestCase):
         report = Broken([]).sweep_inbox("/autobook_inbox")
         self.assertIn("errno=-9", report["error"])
         self.assertEqual(report["deleted"], 0)
+
+    def test_a_refused_delete_is_not_counted_as_freed_space(self) -> None:
+        # Baidu returns errno=132 when the account needs a security check; the
+        # HTTP call still succeeds, so believing it would report phantom
+        # cleanups while the directory kept growing.
+        pan = FakePan([inbox_entry("stranded.pdf", hours_ago=99, size=4096)])
+        pan.accepts_deletes = False
+        report = pan.sweep_inbox("/autobook_inbox")
+        self.assertEqual(report["deleted"], 0)
+        self.assertEqual(report["freed_bytes"], 0)
+        self.assertIn("拒绝", report["error"])
 
     def test_large_sweeps_are_batched(self) -> None:
         pan = FakePan([inbox_entry(f"old{i}.pdf", hours_ago=99) for i in range(120)])

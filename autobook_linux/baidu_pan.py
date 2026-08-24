@@ -46,6 +46,18 @@ SIGN_CACHE_SECONDS = 300
 INBOX_ORPHAN_HOURS = 6
 INBOX_DELETE_BATCH = 50
 
+# What Baidu says when it refuses to delete.  132 is the one that matters: the
+# account requires a security verification before any file-management call, and
+# no request shape gets around it - it has to be cleared from the Baidu app or
+# website with the same account.
+DELETE_ERRNO_HINTS = {
+    132: "百度要求先完成账号安全验证才能删除文件。"
+         "请用百度网盘 App 登录同一账号完成一次安全验证，然后在面板重新扫码登录；"
+         "在此之前中转目录只能手动清理。",
+    -9: "文件不存在，可能已被删除。",
+    111: "有其他文件管理任务正在进行，稍后会重试。",
+}
+
 
 def calculate_download_sign(sign1: str, sign3: str) -> str:
     """Sign a download request the way the pan.baidu.com web client does.
@@ -609,13 +621,29 @@ class BaiduPanClient:
     # ------------------------------------------------------------------
     # cleanup of own drive
     # ------------------------------------------------------------------
-    def delete_own_files(self, paths: list[str]) -> None:
+    def delete_own_files(self, paths: list[str]) -> bool:
+        """Delete files from our own drive; True only if Baidu really accepted it.
+
+        The response carries the outcome in ``errno``, so a 200 means nothing on
+        its own.  Silently discarding it let the transfer directory grow for a
+        long time without a single line in the log.
+        """
         if not paths:
-            return
+            return True
         try:
-            self._post("/api/filemanager", params={"opera": "delete"}, data={"filelist": json.dumps(paths, ensure_ascii=False)})
+            resp = self._post(
+                "/api/filemanager", params={"opera": "delete"},
+                data={"filelist": json.dumps(paths, ensure_ascii=False)},
+            )
         except Exception as exc:
             LOGGER.warning("删除网盘临时文件失败: %s", exc)
+            return False
+        errno = resp.get("errno")
+        if errno == 0:
+            return True
+        LOGGER.warning("删除网盘临时文件被拒绝 errno=%s: %s", errno, DELETE_ERRNO_HINTS.get(
+            errno, "未知错误，可登录百度网盘手动清理 " + (paths[0].rsplit("/", 1)[0] if paths else "")))
+        return False
 
     def clear_dir(self, path: str) -> None:
         try:
@@ -651,6 +679,7 @@ class BaiduPanClient:
             return report
 
         stale: list[str] = []
+        stale_bytes: list[int] = []
         for entry in entries:
             if entry.get("isdir"):
                 continue
@@ -660,14 +689,24 @@ class BaiduPanClient:
             if not mtime or mtime > cutoff:
                 continue
             stale.append(entry["path"])
-            report["freed_bytes"] += int(entry.get("size") or 0)
+            stale_bytes.append(int(entry.get("size") or 0))
             if len(report["samples"]) < 5:
                 report["samples"].append(str(entry.get("server_filename") or ""))
 
-        report["deleted"] = len(stale)
-        if stale and not dry_run:
+        if dry_run:
+            report["deleted"] = len(stale)
+            report["freed_bytes"] = sum(stale_bytes)
+        else:
+            failed = 0
             for start in range(0, len(stale), INBOX_DELETE_BATCH):
-                self.delete_own_files(stale[start:start + INBOX_DELETE_BATCH])
+                chunk = slice(start, start + INBOX_DELETE_BATCH)
+                if self.delete_own_files(stale[chunk]):
+                    report["deleted"] += len(stale[chunk])
+                    report["freed_bytes"] += sum(stale_bytes[chunk])
+                else:
+                    failed += len(stale[chunk])
+            if failed:
+                report["error"] = f"{failed} 个文件删除被百度拒绝，详见日志"
         LOGGER.info(
             "百度转存目录清理: 扫描 %s 个，%s %s 个，释放 %.1f MB",
             report["scanned"], "可清理" if dry_run else "已删除",
@@ -708,4 +747,5 @@ class BaiduPanClient:
             expected = int(own_entry.get("size") or item.size or 0)
             return self.download(dlink, target, expected_size=expected)
         finally:
-            self.delete_own_files([own_path])
+            if not self.delete_own_files([own_path]):
+                LOGGER.warning("转存副本未能删除，将由定期清理重试: %s", own_path)
