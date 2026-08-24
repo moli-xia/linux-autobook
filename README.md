@@ -62,6 +62,7 @@ sudo bash install.sh             # 交互菜单，全部回车即可
 - 支持常见超星 PDG 页面、书籍元数据和目录写入；任何页面解码失败都会中止任务，不生成空白占位页冒充成功。
 - 上传到 Cloudreve 后创建限时分享链接，并将进度、成功结果或错误回报给任务网站。
 - 每个任务使用独立工作目录，结束后自动清理本地中间文件。
+- 自动回收网盘空间：分享到期的成品文件和转存目录里的残留文件都会定期删除，面板可先预览再执行。
 
 ## 已验证的完整流程
 
@@ -401,6 +402,26 @@ sudo autobook --action update
 | `DRIVE_TARGET_DIR` | `transfer` | 上传目标目录 |
 | `DRIVE_EXPIRE_DAYS` | `7` | 分享链接有效天数 |
 | `DRIVE_REQUIRE_UPLOAD_DATE_VERIFY` | `1` | 上传后必须验证文件日期，避免异常的 1970 时间 |
+
+### 存储清理
+
+分享到期不会删除文件，转存目录也会因任务超时或中断留下残留，两处都需要定期回收。
+服务启动 2 分钟后执行第一次清理，之后按 `CLEANUP_INTERVAL_HOURS` 重复：Worker 清理结果网盘，
+网关清理百度转存目录。判断依据是文件**上传到网盘的时间**，不是文件自身的修改时间。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `CLEANUP_ENABLED` | `1` | 设为 `0` 关闭自动清理，改为手动执行 |
+| `CLEANUP_INTERVAL_HOURS` | `6` | 两次清理之间的间隔 |
+| `DRIVE_CLEANUP_GRACE_DAYS` | `1` | 分享失效后额外保留的天数，用于兜住时钟误差 |
+| `BAIDU_INBOX_ORPHAN_HOURS` | `6` | 转存目录中停留超过该时长的文件视为残留（网关侧） |
+
+也可以手动执行，或在面板「维护」页点按钮：
+
+```bash
+python3 tools/storage_sweep.py            # 预览，不删除
+python3 tools/storage_sweep.py --execute  # 真正删除
+```
 
 ### PDF
 
