@@ -20,6 +20,7 @@ from urllib.parse import quote, urlparse
 
 from autobook_linux.baidu_auth import BaiduCredentialStore, resolve_baidu_credentials
 from autobook_linux.baidu_pan import BaiduPanClient
+from autobook_linux import janitor
 from autobook_linux.config import Config
 from autobook_linux.library_index import pick_best_file
 from autobook_linux.lookup import Lookup, LookupError, validate
@@ -69,6 +70,7 @@ class GatewayManager:
             thread_name_prefix="baidu-gateway",
         )
         self._gid: str | None = config.baidu_group_gid or None
+        self.janitor = janitor.for_gateway(config, self._client)
 
     def _client(self) -> BaiduPanClient:
         credentials = self._credentials
@@ -344,4 +346,10 @@ def serve_gateway(config: Config, manager: GatewayManager) -> None:
     context.load_cert_chain(str(config.gateway_tls_cert), str(config.gateway_tls_key))
     server.socket = context.wrap_socket(server.socket, server_side=True)
     LOGGER.info("百度下载网关监听 https://%s:%d", config.gateway_bind, config.gateway_port)
-    server.serve_forever(poll_interval=0.5)
+    # The gateway owns the Baidu session, so it is the role that can prune the
+    # transfer inbox of files stranded by timed-out or crashed tasks.
+    manager.janitor.start()
+    try:
+        server.serve_forever(poll_interval=0.5)
+    finally:
+        manager.janitor.stop()

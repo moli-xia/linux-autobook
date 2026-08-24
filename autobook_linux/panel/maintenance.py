@@ -1,9 +1,11 @@
 """Maintenance actions and worker activity reporting."""
 from __future__ import annotations
 
+import os
 import re
 import secrets
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -94,6 +96,27 @@ def backup_config(settings: PanelSettings, manager: JobManager) -> Job:
         f"echo '备份完成: {target}'"
     )
     return manager.spawn_command("backup", "备份配置", ["bash", "-lc", script], timeout=300)
+
+
+def run_cleanup(settings: PanelSettings, manager: JobManager, execute: bool) -> Job:
+    """Sweep expired deliveries and transfer leftovers off the drives.
+
+    The services already do this on a timer; this is the on-demand button, and
+    it previews by default so an operator can see what would go first.
+    """
+    python = settings.install_dir / ".venv" / "bin" / "python"
+    if not python.exists():
+        python = Path(sys.executable)
+    script = str(settings.install_dir / "tools" / "storage_sweep.py")
+    command = [str(python), script] + (["--execute"] if execute else [])
+    title = "清理网盘存储" if execute else "预览可清理的文件"
+    # spawn_command replaces the environment wholesale, so merge rather than
+    # hand the child a bare one-key env with no PATH.
+    environment = dict(os.environ, ADMIN_CONFIG_DIR=str(settings.config_dir))
+    return manager.spawn_command(
+        "cleanup", title, command, cwd=settings.install_dir,
+        env=environment, timeout=1800,
+    )
 
 
 def update_application(settings: PanelSettings, manager: JobManager) -> Job:

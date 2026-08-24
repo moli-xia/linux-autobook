@@ -776,6 +776,8 @@ def make_handler(settings: PanelSettings) -> type[BaseHTTPRequestHandler]:
                 job = maintenance.regenerate_gateway_cert(settings, jobs, host)
             elif action == "backup":
                 job = maintenance.backup_config(settings, jobs)
+            elif action == "cleanup":
+                job = maintenance.run_cleanup(settings, jobs, execute=bool(payload.get("execute")))
             elif action == "update":
                 job = maintenance.update_application(settings, jobs)
             elif action == "role":

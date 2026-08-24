@@ -1097,6 +1097,8 @@
       + maintenanceItem("permissions", "修复目录权限", "把 runtime 目录和密码字典的属主改回服务账号。服务报「无权限」时使用。")
       + (hasRole("gateway") ? maintenanceItem("gateway_cert", "重新生成网关证书", "证书损坏或更换 IP/域名后使用。生成后需要把新的 gateway.crt 分发给所有 Worker。") : "")
       + maintenanceItem("backup", "备份配置", "把 /etc/linux-autobook 打包到 /var/backups/linux-autobook，升级前建议先备份。")
+      + maintenanceItem("cleanup", "预览可清理的文件", "只统计不删除：列出分享已过期的成品文件和中转目录里的残留文件，以及能释放多少空间。")
+      + maintenanceItem("cleanup_execute", "立即清理网盘", "真正删除上述文件。服务本身已按设定间隔自动清理，这里用于立刻释放空间。")
       + maintenanceItem("update", "更新程序", "从 GitHub 拉取最新代码并重新安装，保留全部配置与数据。")
       + maintenanceItem("restart_panel", "重启管理面板", "面板本身异常时使用，重启期间页面会短暂无法访问。")
       + "</div></div>"
@@ -1474,9 +1476,14 @@
       update: ["更新程序", "将从 GitHub 拉取最新代码并重新安装，配置与数据会保留。过程约 2–5 分钟，服务会重启。"],
       restart_panel: ["重启管理面板", "面板将在数秒后重启，期间页面无法访问，稍后刷新即可。"],
       gateway_cert: ["重新生成网关证书", "旧证书会失效。生成后必须把新的 gateway.crt 复制到所有 Worker，否则它们将无法连接网关。"],
+      cleanup_execute: ["立即清理网盘", "将<strong>永久删除</strong>分享已过期的成品文件，以及中转目录里的残留文件。"
+        + "删除后无法恢复，仍在有效期内的分享链接不受影响。建议先执行一次「预览」确认清单。"],
     };
+    // The same endpoint previews or deletes; only the second needs confirming.
+    var body = { action: op === "cleanup_execute" ? "cleanup" : op };
+    if (op === "cleanup_execute") body.execute = true;
     var proceed = function () {
-      api("/api/maintenance", { method: "POST", body: { action: op } }).then(function (result) {
+      api("/api/maintenance", { method: "POST", body: body }).then(function (result) {
         if (!result.job_id) { toast(result.message || "操作已执行", "ok"); return; }
         state.jobId = result.job_id;
         state.jobSnapshot = { title: result.title, status: "running", elapsed: 0, log: "" };

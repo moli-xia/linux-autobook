@@ -41,6 +41,10 @@ LOGGER = logging.getLogger(__name__)
 # The signature material is stable for a while; refetching it per download
 # would double the request count for no benefit.
 SIGN_CACHE_SECONDS = 300
+# A transfer + download rarely exceeds minutes; anything this old in the inbox
+# is a leftover, not a file some running task still needs.
+INBOX_ORPHAN_HOURS = 6
+INBOX_DELETE_BATCH = 50
 
 
 def calculate_download_sign(sign1: str, sign3: str) -> str:
@@ -373,7 +377,11 @@ class BaiduPanClient:
                 if not entry.get("isdir") and self._stem_of(entry.get("server_filename", "")).startswith(name_prefix)
             ]
             if matches:
-                return matches[0]
+                # Transfers use ondup=newcopy, so a concurrent worker's older
+                # copy may sit here under the plain name while ours landed as
+                # "name(1)".  Take the newest: it is the one we just created,
+                # and it is the one our caller will delete afterwards.
+                return max(matches, key=lambda entry: int(entry.get("server_mtime") or 0))
             time.sleep(2)
         raise TimeoutError(f"转存文件未在 {save_dir} 出现: {name_prefix}*")
 
@@ -616,6 +624,56 @@ class BaiduPanClient:
             return
         targets = [entry["path"] for entry in entries]
         self.delete_own_files(targets)
+
+    def sweep_inbox(
+        self,
+        save_dir: str,
+        older_than_hours: int = INBOX_ORPHAN_HOURS,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Delete transfer leftovers that no running task can still be using.
+
+        ``fetch_group_file`` deletes its own copy as it finishes, but a transfer
+        that timed out, a duplicate left by a retried transfer, or a worker that
+        died mid-task all strand a file here.  Anything older than a few hours
+        cannot belong to a live task, so it is safe to remove.
+        """
+        cutoff = time.time() - max(1, int(older_than_hours)) * 3600
+        report: dict[str, Any] = {
+            "scanned": 0, "deleted": 0, "freed_bytes": 0,
+            "dry_run": dry_run, "samples": [],
+        }
+        try:
+            entries = self.list_dir(save_dir)
+        except RuntimeError as exc:
+            LOGGER.warning("扫描百度转存目录失败: %s", exc)
+            report["error"] = str(exc)[:200]
+            return report
+
+        stale: list[str] = []
+        for entry in entries:
+            if entry.get("isdir"):
+                continue
+            report["scanned"] += 1
+            mtime = int(entry.get("server_mtime") or 0)
+            # A missing mtime means we cannot prove the file is old; leave it.
+            if not mtime or mtime > cutoff:
+                continue
+            stale.append(entry["path"])
+            report["freed_bytes"] += int(entry.get("size") or 0)
+            if len(report["samples"]) < 5:
+                report["samples"].append(str(entry.get("server_filename") or ""))
+
+        report["deleted"] = len(stale)
+        if stale and not dry_run:
+            for start in range(0, len(stale), INBOX_DELETE_BATCH):
+                self.delete_own_files(stale[start:start + INBOX_DELETE_BATCH])
+        LOGGER.info(
+            "百度转存目录清理: 扫描 %s 个，%s %s 个，释放 %.1f MB",
+            report["scanned"], "可清理" if dry_run else "已删除",
+            report["deleted"], report["freed_bytes"] / 1024 / 1024,
+        )
+        return report
 
     # ------------------------------------------------------------------
     # high level: fetch one group library file to local disk
