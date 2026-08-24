@@ -43,6 +43,7 @@ RUN python -m venv .venv \
  && .venv/bin/pip install -r requirements.txt
 
 COPY autobook_linux ./autobook_linux
+COPY tools ./tools
 COPY tests ./tests
 COPY deploy ./deploy
 COPY docs ./docs
