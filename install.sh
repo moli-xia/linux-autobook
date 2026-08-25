@@ -280,6 +280,23 @@ export DEBIAN_FRONTEND=noninteractive
 if command -v apt-get >/dev/null 2>&1; then
   apt-get update
   apt-get install -y git curl python3 python3-venv python3-pip p7zip-full aria2 openssl ca-certificates
+  # RARLAB unrar handles RAR (the bundled 7z cannot decompress RAR5). It lives
+  # in non-free (Debian) / multiverse (Ubuntu), so enable that component and
+  # retry if the first attempt misses it. Without unrar, RAR5 books fail with a
+  # clear "install unrar" message; RAR4 still works through 7z.
+  if ! apt-get install -y unrar; then
+    if command -v add-apt-repository >/dev/null 2>&1; then
+      add-apt-repository -y multiverse || true          # Ubuntu
+      add-apt-repository -y non-free || true             # Debian (older add-apt-repository)
+    fi
+    for src in /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/ubuntu.sources; do
+      [[ -f "$src" ]] && ! grep -q non-free "$src" \
+        && sed -i 's/^Components: .*/& non-free non-free-firmware/' "$src" || true
+    done
+    apt-get update || true
+    apt-get install -y unrar \
+      || echo "WARNING: 未能安装 unrar，RAR5 压缩包将无法解压（RAR4 仍可用 7z）" >&2
+  fi
   # calibre converts EPUB/MOBI/AZW3 to PDF; without the CJK fonts the produced
   # PDF renders Chinese as empty boxes. Both are large, so a failure here is
   # tolerated: the worker then delivers the original e-book file instead.

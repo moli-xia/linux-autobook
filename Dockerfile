@@ -23,14 +23,18 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # p7zip-full and aria2 are the two external commands the pipeline shells out to;
 # openssl generates the self-signed certificates on first boot.
-# Debian's p7zip-full is upstream 7-Zip 26.x, whose Rar/Rar5 handlers are built
-# in, so the non-free p7zip-rar codec is not needed.
+# The bundled p7zip cannot decompress modern RAR5 ("Unsupported Method"), so
+# RARLAB unrar (Debian non-free) handles RAR; the archive layer routes RAR to
+# it and only falls back to 7z for the older RAR4.
 # calibre supplies ebook-convert for EPUB/MOBI/AZW3 -> PDF. It is most of the
 # image size, and fonts-noto-cjk is what keeps Chinese text from rendering as
 # empty boxes in the produced PDF.
-RUN apt-get update \
+RUN sed -i 's/^Components: main$/Components: main non-free non-free-firmware/' \
+        /etc/apt/sources.list.d/debian.sources \
+ && apt-get update \
  && apt-get install -y --no-install-recommends \
         p7zip-full \
+        unrar \
         aria2 \
         openssl \
         ca-certificates \
