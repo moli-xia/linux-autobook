@@ -76,3 +76,20 @@ def unsupported_pdg_type(raw_bytes: bytes) -> int | None:
         return None
     marker = raw_bytes[0x0F]
     return None if marker in SUPPORTED_HH_TYPES else marker
+
+
+def unwrap_simple_jpeg(raw_bytes: bytes) -> bytes | None:
+    """Strip the 5-byte wrapper some early PDG pages put in front of a JPEG.
+
+    The layout is a 4-byte little-endian length, a 1-byte page type, then a
+    raw JPEG stream. The guard is deliberately strict - a real JPEG SOI+marker
+    must follow and the length field must equal the remaining bytes exactly -
+    so an "HH" container, a CCITT stream, or a bare JPEG is never misread as a
+    wrapped one. Returns the inner JPEG, or ``None`` when it does not apply.
+    """
+    if len(raw_bytes) <= 5 or raw_bytes[5:8] != b"\xff\xd8\xff":
+        return None
+    declared = int.from_bytes(raw_bytes[0:4], "little")
+    if declared != len(raw_bytes) - 5:
+        return None
+    return raw_bytes[5:]

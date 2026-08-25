@@ -13,6 +13,7 @@ from autobook_linux.pdg_crypto import (
     decrypt_03h_to_00h,
     normalize_legacy_pdg,
     unsupported_pdg_type,
+    unwrap_simple_jpeg,
 )
 
 
@@ -81,6 +82,32 @@ class UnsupportedTypeTests(unittest.TestCase):
     def test_short_or_non_hh_input_is_ignored(self) -> None:
         self.assertIsNone(unsupported_pdg_type(b"HH"))
         self.assertIsNone(unsupported_pdg_type(b"not a pdg"))
+
+
+class SimpleWrapperTests(unittest.TestCase):
+    """4-byte LE length + 1-byte type + raw JPEG must be unwrapped, strictly."""
+
+    def _wrap(self, jpeg: bytes, type_byte: int = 0x02) -> bytes:
+        return struct.pack("<I", len(jpeg)) + bytes([type_byte]) + jpeg
+
+    def test_wrapped_jpeg_is_unwrapped(self) -> None:
+        jpeg = b"\xff\xd8\xff\xe0" + b"\x00\x10JFIF" + b"payload" + b"\xff\xd9"
+        self.assertEqual(unwrap_simple_jpeg(self._wrap(jpeg)), jpeg)
+
+    def test_bare_jpeg_is_left_for_the_direct_path(self) -> None:
+        self.assertIsNone(unwrap_simple_jpeg(b"\xff\xd8\xff\xe0jpeg"))
+
+    def test_hh_container_is_not_mistaken_for_a_wrapper(self) -> None:
+        self.assertIsNone(unwrap_simple_jpeg(b"HH\x02\x4a" + bytes(200)))
+
+    def test_length_field_must_match_exactly(self) -> None:
+        jpeg = b"\xff\xd8\xff\xe0body\xff\xd9"
+        bad = struct.pack("<I", len(jpeg) + 7) + b"\x02" + jpeg
+        self.assertIsNone(unwrap_simple_jpeg(bad))
+
+    def test_five_byte_header_without_a_jpeg_is_ignored(self) -> None:
+        blob = struct.pack("<I", 4) + b"\x02" + b"\x00\x01\x02\x03"
+        self.assertIsNone(unwrap_simple_jpeg(blob))
 
 
 if __name__ == "__main__":

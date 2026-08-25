@@ -32,7 +32,7 @@ import img2pdf
 import pikepdf
 from tqdm import tqdm
 
-from autobook_linux.pdg_crypto import normalize_legacy_pdg, unsupported_pdg_type
+from autobook_linux.pdg_crypto import normalize_legacy_pdg, unsupported_pdg_type, unwrap_simple_jpeg
 
 try:
     import wasmtime
@@ -107,6 +107,11 @@ class PdgDecoderSession:
         # 如果本身已是标准图片 (JPEG / PNG / TIFF)
         if raw_bytes.startswith(b'\xff\xd8') or raw_bytes.startswith(b'\x89PNG') or raw_bytes.startswith(b'II\x2a\x00') or raw_bytes.startswith(b'MM\x00\x2a'):
             return raw_bytes
+
+        # 简单封装页：4 字节小端长度 + 1 字节类型 + 原始 JPEG，剥壳后原字节嵌入。
+        unwrapped = unwrap_simple_jpeg(raw_bytes)
+        if unwrapped is not None:
+            return unwrapped
 
         raw_bytes = normalize_legacy_pdg(raw_bytes)
 
