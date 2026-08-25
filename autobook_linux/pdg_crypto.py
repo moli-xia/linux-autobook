@@ -55,3 +55,24 @@ def normalize_legacy_pdg(raw_bytes: bytes) -> bytes:
         normalized[0x0F] = 0x00
         return bytes(normalized)
     return decoded
+
+
+# Types the bundled WASM decoder can render after normalisation: the CCITT
+# container (0x00) and the encrypted-CCITT variant (0x02). 0x03 and 0x11 are
+# folded into 0x00 by the transforms above. Every other "HH" type - 0x04, 0x05,
+# the 0x6X / 0xAX families - is a proprietary SuperStar encryption this open
+# decoder cannot decrypt.
+SUPPORTED_HH_TYPES = frozenset({0x00, 0x02})
+
+
+def unsupported_pdg_type(raw_bytes: bytes) -> int | None:
+    """Return the "HH" type byte if it is one this decoder cannot handle.
+
+    ``raw_bytes`` should already have been through :func:`normalize_legacy_pdg`.
+    Returns ``None`` for standard images and for the supported CCITT types, so
+    the caller can raise a precise error instead of a cryptic decode code.
+    """
+    if len(raw_bytes) <= 0x0F or raw_bytes[:2] != b"HH":
+        return None
+    marker = raw_bytes[0x0F]
+    return None if marker in SUPPORTED_HH_TYPES else marker
