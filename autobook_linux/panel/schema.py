@@ -239,6 +239,52 @@ FIELDS: tuple[Field, ...] = (
         help="网关下载文件的暂存目录，过期后自动清理。",
     ),
     Field(
+        "PDG_FALLBACK_ENABLED", "gateway", "gateway_server", "04H Wine 兜底", kind="select",
+        default="0", options=(("1", "开启"), ("0", "关闭")),
+        help="只对文件头明确为 HH 04H 的 PDG 启动临时 Pdg2Pic 容器；普通解析失败和未知格式不会调用。",
+    ),
+    Field(
+        "PDG_FALLBACK_IMAGE", "gateway", "gateway_server", "Pdg2Pic 容器镜像",
+        default="autobook-pdg2pic-wine:local",
+        help="本机预先构建的 Wine 转换镜像。每次请求临时启动，转换完成后删除容器。",
+    ),
+    Field(
+        "PDG_FALLBACK_DOCKER_SOCKET", "gateway", "gateway_server", "Docker socket", kind="path",
+        default="/var/run/docker.sock",
+        help="网关容器内的 Docker Engine socket，用于按需创建转换容器。",
+    ),
+    Field(
+        "PDG_FALLBACK_RUNTIME_VOLUME", "gateway", "gateway_server", "共享运行卷名称",
+        keep_blank=True,
+        help="Docker 部署时填写映射到 /opt/autobook-linux/runtime 的具名卷。只共享运行数据，不能共享含凭据的配置卷。",
+        example="autobook-docker_autobook-runtime",
+    ),
+    Field(
+        "PDG_FALLBACK_JOB_ROOT", "gateway", "gateway_server", "04H 临时任务目录", kind="path",
+        default="/opt/autobook-linux/runtime/pdg-fallback/jobs",
+        help="上传的 PDG 与转换结果所在目录；响应发送完成后自动删除。",
+    ),
+    Field(
+        "PDG_FALLBACK_TIMEOUT_SECONDS", "gateway", "gateway_server", "04H 转换超时", kind="number",
+        default="7200", unit="秒", min_value=60, max_value=86400,
+        help="单本 04H 书籍允许 Pdg2Pic 运行的最长时间。",
+    ),
+    Field(
+        "PDG_FALLBACK_MAX_UPLOAD_MB", "gateway", "gateway_server", "04H 上传上限", kind="number",
+        default="1024", unit="MB", min_value=16, max_value=8192,
+        help="Worker 上传到网关的单本 PDG 压缩包大小上限。",
+    ),
+    Field(
+        "PDG_FALLBACK_MEMORY_MB", "gateway", "gateway_server", "转换内存上限", kind="number",
+        default="2048", unit="MB", min_value=512, max_value=16384,
+        help="每个临时 Wine 容器可使用的最大内存。",
+    ),
+    Field(
+        "PDG_FALLBACK_CPUS", "gateway", "gateway_server", "转换 CPU 上限", kind="number",
+        default="2", unit="核", min_value=1, max_value=16,
+        help="每个临时 Wine 容器可使用的 CPU 核数。",
+    ),
+    Field(
         "BAIDU_GROUP_NAME", "gateway", "baidu_account", "目标群名称", default="读秀12群",
         essential=True, keep_blank=True,
         help="资源所在的百度网盘群名称。填了下面的群 GID 时这一项可以留空。",

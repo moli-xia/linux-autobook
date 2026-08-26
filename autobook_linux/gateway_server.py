@@ -24,6 +24,7 @@ from autobook_linux import janitor
 from autobook_linux.config import Config
 from autobook_linux.library_index import pick_best_file
 from autobook_linux.lookup import Lookup, LookupError, queries_for, validate
+from autobook_linux.pdg_fallback import PdgFallbackError, PdgFallbackService
 
 LOGGER = logging.getLogger(__name__)
 _SSNO_RE = re.compile(r"^\d{8}$")
@@ -276,7 +277,11 @@ def _public_job(job: GatewayJob) -> dict[str, Any]:
     }
 
 
-def make_handler(manager: GatewayManager, token: str) -> type[BaseHTTPRequestHandler]:
+def make_handler(
+    manager: GatewayManager,
+    token: str,
+    pdg_fallback: PdgFallbackService | None = None,
+) -> type[BaseHTTPRequestHandler]:
     class GatewayHandler(BaseHTTPRequestHandler):
         server_version = "autobook-gateway/1.0"
 
@@ -312,7 +317,10 @@ def make_handler(manager: GatewayManager, token: str) -> type[BaseHTTPRequestHan
         def do_GET(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
             if path == "/health":
-                self._send_json(200, {"status": "ok", "jobs": manager.stats()})
+                payload: dict[str, Any] = {"status": "ok", "jobs": manager.stats()}
+                if pdg_fallback is not None:
+                    payload["pdg_fallback"] = pdg_fallback.status()
+                self._send_json(200, payload)
                 return
             if not self._require_auth():
                 return
@@ -344,7 +352,11 @@ def make_handler(manager: GatewayManager, token: str) -> type[BaseHTTPRequestHan
         def do_POST(self) -> None:  # noqa: N802
             if not self._require_auth():
                 return
-            if urlparse(self.path).path != "/v1/fetch":
+            path = urlparse(self.path).path
+            if path == "/v1/pdg-fallback":
+                self._handle_pdg_fallback()
+                return
+            if path != "/v1/fetch":
                 self._send_json(404, {"error": "not found"})
                 return
             try:
@@ -365,6 +377,42 @@ def make_handler(manager: GatewayManager, token: str) -> type[BaseHTTPRequestHan
                 LOGGER.exception("提交网关任务失败")
                 self._send_json(500, {"error": str(exc)[:500]})
 
+        def _handle_pdg_fallback(self) -> None:
+            if pdg_fallback is None or not pdg_fallback.enabled:
+                self._send_json(503, {"error": "Pdg2Pic Wine 兜底未启用"})
+                return
+            result = None
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                expected_sha256 = self.headers.get("X-Content-SHA256", "").strip()
+                if expected_sha256 and not re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha256):
+                    raise ValueError("X-Content-SHA256 格式无效")
+                result = pdg_fallback.convert(self.rfile, length, expected_sha256)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/pdf")
+                self.send_header("Content-Length", str(result.size))
+                self.send_header("Content-Disposition", "attachment; filename=pdg-fallback.pdf")
+                self.send_header("X-Content-SHA256", result.sha256)
+                self.send_header("X-PDF-Pages", str(result.pages))
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                with result.pdf.open("rb") as source:
+                    shutil.copyfileobj(source, self.wfile, length=1024 * 1024)
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+            except PdgFallbackError as exc:
+                LOGGER.warning("Pdg2Pic 兜底失败: %s", exc)
+                self._send_json(422, {"error": str(exc)[:1000]})
+            except (BrokenPipeError, ConnectionResetError):
+                LOGGER.warning("Pdg2Pic 兜底结果发送时客户端已断开")
+            except Exception as exc:
+                LOGGER.exception("Pdg2Pic 兜底请求失败")
+                self._send_json(500, {"error": str(exc)[:500]})
+            finally:
+                if result is not None:
+                    pdg_fallback.cleanup(result)
+
         def do_DELETE(self) -> None:  # noqa: N802
             if not self._require_auth():
                 return
@@ -379,9 +427,10 @@ def make_handler(manager: GatewayManager, token: str) -> type[BaseHTTPRequestHan
 
 
 def serve_gateway(config: Config, manager: GatewayManager) -> None:
+    pdg_fallback = PdgFallbackService(config)
     server = ThreadingHTTPServer(
         (config.gateway_bind, config.gateway_port),
-        make_handler(manager, config.baidu_gateway_token),
+        make_handler(manager, config.baidu_gateway_token, pdg_fallback),
     )
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2

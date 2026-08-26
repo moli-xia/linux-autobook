@@ -63,6 +63,20 @@ def normalize_legacy_pdg(raw_bytes: bytes) -> bytes:
 # the 0x6X / 0xAX families - is a proprietary SuperStar encryption this open
 # decoder cannot decrypt.
 SUPPORTED_HH_TYPES = frozenset({0x00, 0x02})
+PDG2PIC_FALLBACK_HH_TYPES = frozenset({0x04})
+
+
+def pdg2pic_fallback_type(raw_bytes: bytes) -> int | None:
+    """Return a marker explicitly approved for the Wine fallback.
+
+    This is intentionally an allowlist, not the inverse of the open decoder's
+    support list. Corrupt pages, ordinary decode errors, and unknown future
+    markers must keep failing normally instead of being sent to Pdg2Pic.
+    """
+    if len(raw_bytes) <= 0x0F or raw_bytes[:2] != b"HH":
+        return None
+    marker = raw_bytes[0x0F]
+    return marker if marker in PDG2PIC_FALLBACK_HH_TYPES else None
 
 
 def unsupported_pdg_type(raw_bytes: bytes) -> int | None:

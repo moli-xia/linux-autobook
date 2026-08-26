@@ -112,6 +112,17 @@ class Config:
     gateway_cache_ttl_seconds: int
     gateway_job_root: Path
 
+    # --- proprietary PDG fallback (gateway side) ---
+    pdg_fallback_enabled: bool
+    pdg_fallback_image: str
+    pdg_fallback_docker_socket: Path
+    pdg_fallback_runtime_volume: str
+    pdg_fallback_job_root: Path
+    pdg_fallback_timeout_seconds: int
+    pdg_fallback_max_upload_mb: int
+    pdg_fallback_memory_mb: int
+    pdg_fallback_cpus: int
+
     @classmethod
     def load(cls) -> "Config":
         load_dotenv()
@@ -178,6 +189,17 @@ class Config:
             gateway_concurrency=max(1, _get_int("GATEWAY_CONCURRENCY", 3)),
             gateway_cache_ttl_seconds=max(60, _get_int("GATEWAY_CACHE_TTL_SECONDS", 3600)),
             gateway_job_root=Path(_get("GATEWAY_JOB_ROOT", str(PROJECT_ROOT / "runtime" / "gateway" / "jobs"))),
+            pdg_fallback_enabled=_get("PDG_FALLBACK_ENABLED", "0").lower() not in {"0", "false", "no"},
+            pdg_fallback_image=_get("PDG_FALLBACK_IMAGE", "autobook-pdg2pic-wine:local"),
+            pdg_fallback_docker_socket=Path(_get("PDG_FALLBACK_DOCKER_SOCKET", "/var/run/docker.sock")),
+            pdg_fallback_runtime_volume=_get("PDG_FALLBACK_RUNTIME_VOLUME"),
+            pdg_fallback_job_root=Path(
+                _get("PDG_FALLBACK_JOB_ROOT", str(PROJECT_ROOT / "runtime" / "pdg-fallback" / "jobs"))
+            ),
+            pdg_fallback_timeout_seconds=max(60, _get_int("PDG_FALLBACK_TIMEOUT_SECONDS", 7200)),
+            pdg_fallback_max_upload_mb=max(16, _get_int("PDG_FALLBACK_MAX_UPLOAD_MB", 1024)),
+            pdg_fallback_memory_mb=max(512, _get_int("PDG_FALLBACK_MEMORY_MB", 2048)),
+            pdg_fallback_cpus=max(1, _get_int("PDG_FALLBACK_CPUS", 2)),
         )
         return cfg
 

@@ -31,12 +31,19 @@ services:
       AUTOBOOK_GATEWAY_TOKEN: ${AUTOBOOK_GATEWAY_TOKEN:-}
       AUTOBOOK_GATEWAY_URL: ${AUTOBOOK_GATEWAY_URL:-}
       AUTOBOOK_GATEWAY_CA_FILE: ${AUTOBOOK_GATEWAY_CA_FILE:-}
+      # 仅中心网关开启；转换镜像按请求临时启动，任务结束即删除。
+      AUTOBOOK_PDG_FALLBACK_ENABLED: ${AUTOBOOK_PDG_FALLBACK_ENABLED:-0}
+      AUTOBOOK_PDG_FALLBACK_IMAGE: ${AUTOBOOK_PDG_FALLBACK_IMAGE:-autobook-pdg2pic-wine:local}
+      # 仅共享运行卷；不要把包含凭据的配置卷交给 Wine 容器。
+      AUTOBOOK_PDG_FALLBACK_RUNTIME_VOLUME: ${AUTOBOOK_PDG_FALLBACK_RUNTIME_VOLUME:-}
     ports:
       - "${ADMIN_PORT:-8766}:8766"     # 管理面板 HTTPS
       - "${GATEWAY_PORT:-8765}:8765"   # 下载网关，仅网关角色需要对外开放
     volumes:
       - autobook-config:/etc/linux-autobook
       - autobook-runtime:/opt/autobook-linux/runtime
+      # 网关通过 Engine API 按需创建受限的 Wine 转换容器。
+      - /var/run/docker.sock:/var/run/docker.sock
     # 转换大部头书籍时临时文件较多，给容器留出足够的共享内存。
     shm_size: 512m
     healthcheck:

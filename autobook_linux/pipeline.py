@@ -16,6 +16,8 @@ import threading
 import time
 from pathlib import Path
 
+import pikepdf
+
 from autobook_linux.archive import (
     ARCHIVE_SUFFIXES,
     extract_archive,
@@ -29,6 +31,7 @@ from autobook_linux.library_index import LibraryIndex, pick_best_file
 from autobook_linux.lookup import Lookup, LookupError
 from autobook_linux.lookup import plan_from_task as lookup_plan
 from autobook_linux.lookup import queries_for
+from autobook_linux.pdg_crypto import pdg2pic_fallback_type
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "vendor"))
 from pdg2pdf import PdgConverter  # noqa: E402  (vendored, MIT, bj5/pdg2pdf_open)
@@ -307,12 +310,35 @@ class TaskPipeline:
             return target_pdf
 
         # 2) PDG folder -> convert
-        pdg_count = len(find_files_by_suffix(extract_dir, {".pdg"}))
-        if pdg_count == 0:
+        pdg_files = find_files_by_suffix(extract_dir, {".pdg"})
+        pdg_count = len(pdg_files)
+        if not pdg_files:
             detail = f"; 嵌套归档错误: {' | '.join(nested_errors[:3])}" if nested_errors else ""
             raise PipelineError(f"压缩包内未发现 PDF 或 PDG 文件: {downloaded.name}{detail}")
 
         LOGGER.info("开始 PDG 转换 (%d 页): %s", pdg_count, downloaded.name)
+        proprietary_types: set[int] = set()
+        for page in pdg_files:
+            with page.open("rb") as source:
+                marker = pdg2pic_fallback_type(source.read(16))
+            if marker is not None:
+                proprietary_types.add(marker)
+        if proprietary_types:
+            common_parent = Path(os.path.commonpath([str(page.resolve().parent) for page in pdg_files]))
+            markers = "/".join(f"{value:02X}H" for value in sorted(proprietary_types))
+            LOGGER.warning("检测到专有 PDG 类型 %s，转交网关按需 Wine 兜底", markers)
+            try:
+                self.gateway.convert_pdg_fallback(common_parent, target_pdf)
+                with pikepdf.open(target_pdf) as document:
+                    pages = len(document.pages)
+                if pages <= 0:
+                    raise PipelineError("Pdg2Pic 网关兜底生成的 PDF 没有页面")
+            except Exception as exc:
+                target_pdf.unlink(missing_ok=True)
+                raise PipelineError(f"专有 PDG {markers} 的 Pdg2Pic 网关兜底失败: {exc}") from exc
+            LOGGER.info("Pdg2Pic 网关兜底完成 (%d 页): %s", pages, target_pdf.name)
+            return target_pdf
+
         converter = PdgConverter(str(extract_dir), output_path=str(target_pdf), dpi=float(self.config.pdg_dpi))
         converter.convert()
         if not target_pdf.exists() or target_pdf.stat().st_size == 0:

@@ -109,6 +109,15 @@ if [[ "$ROLE" == "all" || "$ROLE" == "gateway" ]]; then
   ensure_env "$CONFIG_DIR/gateway.env" GATEWAY_CONCURRENCY "3"
   ensure_env "$CONFIG_DIR/gateway.env" GATEWAY_CACHE_TTL_SECONDS "3600"
   ensure_env "$CONFIG_DIR/gateway.env" GATEWAY_JOB_ROOT "$INSTALL_DIR/runtime/gateway/jobs"
+  ensure_env "$CONFIG_DIR/gateway.env" PDG_FALLBACK_ENABLED "${AUTOBOOK_PDG_FALLBACK_ENABLED:-0}"
+  ensure_env "$CONFIG_DIR/gateway.env" PDG_FALLBACK_IMAGE "${AUTOBOOK_PDG_FALLBACK_IMAGE:-autobook-pdg2pic-wine:local}"
+  ensure_env "$CONFIG_DIR/gateway.env" PDG_FALLBACK_DOCKER_SOCKET "/var/run/docker.sock"
+  ensure_env "$CONFIG_DIR/gateway.env" PDG_FALLBACK_RUNTIME_VOLUME "${AUTOBOOK_PDG_FALLBACK_RUNTIME_VOLUME:-}"
+  ensure_env "$CONFIG_DIR/gateway.env" PDG_FALLBACK_JOB_ROOT "$INSTALL_DIR/runtime/pdg-fallback/jobs"
+  ensure_env "$CONFIG_DIR/gateway.env" PDG_FALLBACK_TIMEOUT_SECONDS "7200"
+  ensure_env "$CONFIG_DIR/gateway.env" PDG_FALLBACK_MAX_UPLOAD_MB "1024"
+  ensure_env "$CONFIG_DIR/gateway.env" PDG_FALLBACK_MEMORY_MB "2048"
+  ensure_env "$CONFIG_DIR/gateway.env" PDG_FALLBACK_CPUS "2"
   make_cert "$INSTALL_DIR/runtime/gateway.crt" "$INSTALL_DIR/runtime/gateway.key"
 fi
 
