@@ -34,6 +34,10 @@ COLUMNS = ("key", "rank", "title", "ss", "isbn", "suffix", "filename", "path", "
 CJK_RE = re.compile(r"[一-鿿]")
 LETTER_RE = re.compile(r"[A-Za-z]")
 CONTENT_BODY = "<p></p><p></p><p>该书暂无内容介绍。</p><p></p><p></p>"
+# What the site tells a reader about where a book comes from.  Deliberately
+# does not name the upstream service.
+SOURCE_LABEL = "非标准文件检索"
+LEGACY_SOURCE_LABEL = "百度网盘群文件库"
 TITLE_MAX = 80          # le_cms_article.title is varchar(80)
 INTRO_MAX = 500         # le_cms_article.intro is varchar(500)
 LOAD_CEILING = 6.0
@@ -89,7 +93,7 @@ def site_intro(row: dict) -> str:
     if row["ss"]:
         parts.append(f"【SS码】：{html.escape(row['ss'], quote=False)}")
     parts.append(f"【格式】：{html.escape(row['suffix'].lstrip('.').upper(), quote=False)}")
-    parts.append("【来源】：百度网盘群文件库")
+    parts.append(f"【来源】：{SOURCE_LABEL}")
     return "<br />".join(parts)[:INTRO_MAX]
 
 

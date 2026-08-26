@@ -41,6 +41,27 @@ LOGGER = logging.getLogger(__name__)
 # The signature material is stable for a while; refetching it per download
 # would double the request count for no benefit.
 SIGN_CACHE_SECONDS = 300
+# The group search answers the same query inconsistently - measured at roughly
+# one empty response in two - so an empty result is retried before it is taken
+# at face value.  Three attempts turn a 50% hit rate into about 88%.
+SEARCH_EMPTY_RETRIES = 4
+SEARCH_RETRY_DELAY = 0.6
+# A transfer + download rarely exceeds minutes; anything this old in the inbox
+# is a leftover, not a file some running task still needs.
+INBOX_ORPHAN_HOURS = 6
+INBOX_DELETE_BATCH = 50
+
+# What Baidu says when it refuses to delete.  132 is the one that matters: the
+# account requires a security verification before any file-management call, and
+# no request shape gets around it - it has to be cleared from the Baidu app or
+# website with the same account.
+DELETE_ERRNO_HINTS = {
+    132: "百度要求先完成账号安全验证才能删除文件。"
+         "请用百度网盘 App 登录同一账号完成一次安全验证，然后在面板重新扫码登录；"
+         "在此之前中转目录只能手动清理。",
+    -9: "文件不存在，可能已被删除。",
+    111: "有其他文件管理任务正在进行，稍后会重试。",
+}
 
 
 def calculate_download_sign(sign1: str, sign3: str) -> str:
@@ -200,15 +221,33 @@ class BaiduPanClient:
         digest_hex = hashlib.md5(source).hexdigest().encode("ascii")
         return base64.b64encode(digest_hex).decode("ascii")
 
-    def search_group_files(self, gid: str, keyword: str) -> list[GroupShareFile]:
+    def search_group_files(
+        self, gid: str, keyword: str, retries: int = SEARCH_EMPTY_RETRIES
+    ) -> list[GroupShareFile]:
         """Search the server-side group library without crawling its folders.
 
         Baidu's public OpenAPI does not document this endpoint, but the desktop
         client uses it for the fast search box in a group file library.
+
+        The endpoint is not consistent: repeating one identical query returns
+        results about half the time and an empty list the rest, apparently
+        depending on which replica answers.  An empty answer is therefore
+        retried before it is believed, otherwise every other task would fail
+        for a book that is plainly there.
         """
         keyword = str(keyword).strip()
         if not keyword:
             return []
+        for attempt in range(max(1, retries)):
+            matches = self._search_group_once(gid, keyword)
+            if matches:
+                return matches
+            if attempt + 1 < max(1, retries):
+                time.sleep(SEARCH_RETRY_DELAY)
+        LOGGER.debug("群搜索 %r 连续 %d 次为空", keyword, max(1, retries))
+        return []
+
+    def _search_group_once(self, gid: str, keyword: str) -> list[GroupShareFile]:
         vuk = self._my_uk()
         data = self._get(
             "/basembox/group/multisearch",
@@ -373,7 +412,11 @@ class BaiduPanClient:
                 if not entry.get("isdir") and self._stem_of(entry.get("server_filename", "")).startswith(name_prefix)
             ]
             if matches:
-                return matches[0]
+                # Transfers use ondup=newcopy, so a concurrent worker's older
+                # copy may sit here under the plain name while ours landed as
+                # "name(1)".  Take the newest: it is the one we just created,
+                # and it is the one our caller will delete afterwards.
+                return max(matches, key=lambda entry: int(entry.get("server_mtime") or 0))
             time.sleep(2)
         raise TimeoutError(f"转存文件未在 {save_dir} 出现: {name_prefix}*")
 
@@ -601,13 +644,29 @@ class BaiduPanClient:
     # ------------------------------------------------------------------
     # cleanup of own drive
     # ------------------------------------------------------------------
-    def delete_own_files(self, paths: list[str]) -> None:
+    def delete_own_files(self, paths: list[str]) -> bool:
+        """Delete files from our own drive; True only if Baidu really accepted it.
+
+        The response carries the outcome in ``errno``, so a 200 means nothing on
+        its own.  Silently discarding it let the transfer directory grow for a
+        long time without a single line in the log.
+        """
         if not paths:
-            return
+            return True
         try:
-            self._post("/api/filemanager", params={"opera": "delete"}, data={"filelist": json.dumps(paths, ensure_ascii=False)})
+            resp = self._post(
+                "/api/filemanager", params={"opera": "delete"},
+                data={"filelist": json.dumps(paths, ensure_ascii=False)},
+            )
         except Exception as exc:
             LOGGER.warning("删除网盘临时文件失败: %s", exc)
+            return False
+        errno = resp.get("errno")
+        if errno == 0:
+            return True
+        LOGGER.warning("删除网盘临时文件被拒绝 errno=%s: %s", errno, DELETE_ERRNO_HINTS.get(
+            errno, "未知错误，可登录百度网盘手动清理 " + (paths[0].rsplit("/", 1)[0] if paths else "")))
+        return False
 
     def clear_dir(self, path: str) -> None:
         try:
@@ -616,6 +675,67 @@ class BaiduPanClient:
             return
         targets = [entry["path"] for entry in entries]
         self.delete_own_files(targets)
+
+    def sweep_inbox(
+        self,
+        save_dir: str,
+        older_than_hours: int = INBOX_ORPHAN_HOURS,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Delete transfer leftovers that no running task can still be using.
+
+        ``fetch_group_file`` deletes its own copy as it finishes, but a transfer
+        that timed out, a duplicate left by a retried transfer, or a worker that
+        died mid-task all strand a file here.  Anything older than a few hours
+        cannot belong to a live task, so it is safe to remove.
+        """
+        cutoff = time.time() - max(1, int(older_than_hours)) * 3600
+        report: dict[str, Any] = {
+            "scanned": 0, "deleted": 0, "freed_bytes": 0,
+            "dry_run": dry_run, "samples": [],
+        }
+        try:
+            entries = self.list_dir(save_dir)
+        except RuntimeError as exc:
+            LOGGER.warning("扫描百度转存目录失败: %s", exc)
+            report["error"] = str(exc)[:200]
+            return report
+
+        stale: list[str] = []
+        stale_bytes: list[int] = []
+        for entry in entries:
+            if entry.get("isdir"):
+                continue
+            report["scanned"] += 1
+            mtime = int(entry.get("server_mtime") or 0)
+            # A missing mtime means we cannot prove the file is old; leave it.
+            if not mtime or mtime > cutoff:
+                continue
+            stale.append(entry["path"])
+            stale_bytes.append(int(entry.get("size") or 0))
+            if len(report["samples"]) < 5:
+                report["samples"].append(str(entry.get("server_filename") or ""))
+
+        if dry_run:
+            report["deleted"] = len(stale)
+            report["freed_bytes"] = sum(stale_bytes)
+        else:
+            failed = 0
+            for start in range(0, len(stale), INBOX_DELETE_BATCH):
+                chunk = slice(start, start + INBOX_DELETE_BATCH)
+                if self.delete_own_files(stale[chunk]):
+                    report["deleted"] += len(stale[chunk])
+                    report["freed_bytes"] += sum(stale_bytes[chunk])
+                else:
+                    failed += len(stale[chunk])
+            if failed:
+                report["error"] = f"{failed} 个文件删除被百度拒绝，详见日志"
+        LOGGER.info(
+            "百度转存目录清理: 扫描 %s 个，%s %s 个，释放 %.1f MB",
+            report["scanned"], "可清理" if dry_run else "已删除",
+            report["deleted"], report["freed_bytes"] / 1024 / 1024,
+        )
+        return report
 
     # ------------------------------------------------------------------
     # high level: fetch one group library file to local disk
@@ -650,4 +770,5 @@ class BaiduPanClient:
             expected = int(own_entry.get("size") or item.size or 0)
             return self.download(dlink, target, expected_size=expected)
         finally:
-            self.delete_own_files([own_path])
+            if not self.delete_own_files([own_path]):
+                LOGGER.warning("转存副本未能删除，将由定期清理重试: %s", own_path)

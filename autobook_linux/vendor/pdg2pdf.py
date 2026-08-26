@@ -32,7 +32,7 @@ import img2pdf
 import pikepdf
 from tqdm import tqdm
 
-from autobook_linux.pdg_crypto import normalize_legacy_pdg
+from autobook_linux.pdg_crypto import normalize_legacy_pdg, unsupported_pdg_type, unwrap_simple_jpeg
 
 try:
     import wasmtime
@@ -108,7 +108,22 @@ class PdgDecoderSession:
         if raw_bytes.startswith(b'\xff\xd8') or raw_bytes.startswith(b'\x89PNG') or raw_bytes.startswith(b'II\x2a\x00') or raw_bytes.startswith(b'MM\x00\x2a'):
             return raw_bytes
 
+        # 简单封装页：4 字节小端长度 + 1 字节类型 + 原始 JPEG，剥壳后原字节嵌入。
+        unwrapped = unwrap_simple_jpeg(raw_bytes)
+        if unwrapped is not None:
+            return unwrapped
+
         raw_bytes = normalize_legacy_pdg(raw_bytes)
+
+        # A proprietary "HH" type (0x04, 0x6X, 0xAX, ...) would otherwise reach
+        # the WASM decoder and come back as a cryptic "错误码: -3". Name it, so an
+        # operator can tell an unsupported format apart from an actual failure.
+        unsupported = unsupported_pdg_type(raw_bytes)
+        if unsupported is not None:
+            raise ValueError(
+                f"不支持的超星 PDG 加密类型 0x{unsupported:02X}："
+                "该页使用专有加密，当前解码器无法解密（仅支持 00H/02H/03H/11H 及标准 JPEG/PNG/TIFF）"
+            )
 
         data_ptr = self.malloc(self.store, len(raw_bytes))
         bitmap_ptr = None

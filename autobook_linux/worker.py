@@ -16,6 +16,7 @@ from pathlib import Path
 from autobook_linux.baidu_auth import BaiduCredentialStore, resolve_baidu_credentials
 from autobook_linux.baidu_pan import BaiduPanClient
 from autobook_linux.config import Config
+from autobook_linux import janitor
 from autobook_linux.gateway_client import BaiduGatewayClient
 from autobook_linux.library_index import LibraryIndex
 from autobook_linux.pipeline import TaskPipeline, extract_ssno
@@ -66,6 +67,7 @@ class Worker:
         self._active: set[Future] = set()
         self._active_lock = threading.Lock()
         self._stop = threading.Event()
+        self.janitor = janitor.for_worker(config)
 
     # ------------------------------------------------------------------
     def preflight(self) -> None:
@@ -101,6 +103,8 @@ class Worker:
             self.config.site_base_url, self.config.worker_id,
             self.config.worker_queue, self.config.concurrency,
         )
+        if not once:
+            self.janitor.start()
         while not self._stop.is_set():
             self._reap()
             if len(self._active) >= self.config.concurrency:
@@ -133,6 +137,7 @@ class Worker:
 
     def stop(self) -> None:
         self._stop.set()
+        self.janitor.stop()
 
     # ------------------------------------------------------------------
     def _run_task(self, task: dict) -> None:

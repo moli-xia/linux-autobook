@@ -16,6 +16,7 @@ from typing import Any
 
 from autobook_linux.archive import ARCHIVE_SUFFIXES
 from autobook_linux.baidu_pan import BaiduPanClient, GroupShareFile
+from autobook_linux.lookup import coverage, title_matches
 
 LOGGER = logging.getLogger(__name__)
 
@@ -59,7 +60,7 @@ def pick_best_file(
         return None
     needle_lower = (needle or "").lower()
 
-    def score(item: GroupShareFile) -> tuple[int, int, int]:
+    def score(item: GroupShareFile) -> tuple[int, ...]:
         name = item.name
         stem = name.rsplit(".", 1)[0] if "." in name else name
         suffix = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
@@ -76,12 +77,20 @@ def pick_best_file(
             # that needs no unpacking over one merely named after the code.
             exact_rank = 0 if stem == needle else 1
             return (type_rank, exact_rank, -item.server_mtime)
-        # An ISBN or title search can return unrelated files, so a name that
-        # actually contains the needle outranks a convenient format.
+        if kind == "title":
+            # The query that found these may have been a shortened form of the
+            # title, so rank on how much of the *whole* title each name carries.
+            match_rank = 0 if title_matches(name, needle) else 1
+            return (match_rank, -int(coverage(name, needle) * 1000), type_rank, -item.server_mtime)
+        # An ISBN search can return unrelated files, so a name that actually
+        # contains the needle outranks a convenient format.
         match_rank = 0 if needle_lower in name.lower() else 1
         return (match_rank, type_rank, -item.server_mtime)
 
     best = sorted(candidates, key=score)[0]
+    if kind == "title":
+        # Never hand back a book that merely shares an author or a word.
+        return best if title_matches(best.name, needle) else None
     if kind != "ss" and needle_lower not in best.name.lower():
         return None
     return best

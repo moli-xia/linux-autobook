@@ -42,6 +42,7 @@ GROUPS: tuple[Group, ...] = (
     Group("site", "worker", "任务网站", "Worker 从这里领取任务、上报进度并交付结果。"),
     Group("gateway_client", "worker", "下载网关连接", "Worker 不直接接触百度账号，所有下载都通过中心网关完成。"),
     Group("drive", "worker", "结果网盘", "成品 PDF 上传到 Cloudreve 网盘并生成分享链接。"),
+    Group("cleanup", "worker", "存储清理", "自动删除已过期的交付文件，避免网盘被无限占满。", essential=False),
     Group("processing", "worker", "处理参数", "并发、清晰度等影响速度与资源占用的参数。", essential=False),
     Group("paths", "worker", "本地路径与命令", "工作目录和外部命令位置，通常保持默认。", essential=False),
     Group("gateway_server", "gateway", "网关服务", "中心网关自身的监听地址、证书与并发。"),
@@ -140,6 +141,21 @@ FIELDS: tuple[Field, ...] = (
         help="生成的分享链接多少天后失效。",
     ),
     Field(
+        "CLEANUP_ENABLED", "both", "cleanup", "自动清理", kind="select",
+        default="1", options=(("1", "开启（推荐）"), ("0", "关闭")),
+        help="定期删除分享已过期的成品文件和百度转存目录里的残留文件。关闭后网盘会持续增长，需要自己手动清理。",
+    ),
+    Field(
+        "CLEANUP_INTERVAL_HOURS", "both", "cleanup", "清理间隔", kind="number",
+        default="6", unit="小时", min_value=1, max_value=720,
+        help="每隔多久自动执行一次清理。服务启动 2 分钟后先跑一次。",
+    ),
+    Field(
+        "DRIVE_CLEANUP_GRACE_DAYS", "worker", "cleanup", "过期宽限期", kind="number",
+        default="1", unit="天", min_value=0, max_value=90,
+        help="分享失效后再多保留几天才删除，防止时钟误差导致仍然有效的链接被提前删掉。",
+    ),
+    Field(
         "DRIVE_POLICY_ID", "worker", "drive", "存储策略 ID", keep_blank=True,
         help="Cloudreve 配置了多个存储策略时才需要指定，绝大多数情况留空即可。",
     ),
@@ -223,6 +239,52 @@ FIELDS: tuple[Field, ...] = (
         help="网关下载文件的暂存目录，过期后自动清理。",
     ),
     Field(
+        "PDG_FALLBACK_ENABLED", "gateway", "gateway_server", "04H Wine 兜底", kind="select",
+        default="0", options=(("1", "开启"), ("0", "关闭")),
+        help="只对文件头明确为 HH 04H 的 PDG 启动临时 Pdg2Pic 容器；普通解析失败和未知格式不会调用。",
+    ),
+    Field(
+        "PDG_FALLBACK_IMAGE", "gateway", "gateway_server", "Pdg2Pic 容器镜像",
+        default="autobook-pdg2pic-wine:local",
+        help="本机预先构建的 Wine 转换镜像。每次请求临时启动，转换完成后删除容器。",
+    ),
+    Field(
+        "PDG_FALLBACK_DOCKER_SOCKET", "gateway", "gateway_server", "Docker socket", kind="path",
+        default="/var/run/docker.sock",
+        help="网关容器内的 Docker Engine socket，用于按需创建转换容器。",
+    ),
+    Field(
+        "PDG_FALLBACK_RUNTIME_VOLUME", "gateway", "gateway_server", "共享运行卷名称",
+        keep_blank=True,
+        help="Docker 部署时填写映射到 /opt/autobook-linux/runtime 的具名卷。只共享运行数据，不能共享含凭据的配置卷。",
+        example="autobook-docker_autobook-runtime",
+    ),
+    Field(
+        "PDG_FALLBACK_JOB_ROOT", "gateway", "gateway_server", "04H 临时任务目录", kind="path",
+        default="/opt/autobook-linux/runtime/pdg-fallback/jobs",
+        help="上传的 PDG 与转换结果所在目录；响应发送完成后自动删除。",
+    ),
+    Field(
+        "PDG_FALLBACK_TIMEOUT_SECONDS", "gateway", "gateway_server", "04H 转换超时", kind="number",
+        default="7200", unit="秒", min_value=60, max_value=86400,
+        help="单本 04H 书籍允许 Pdg2Pic 运行的最长时间。",
+    ),
+    Field(
+        "PDG_FALLBACK_MAX_UPLOAD_MB", "gateway", "gateway_server", "04H 上传上限", kind="number",
+        default="1024", unit="MB", min_value=16, max_value=8192,
+        help="Worker 上传到网关的单本 PDG 压缩包大小上限。",
+    ),
+    Field(
+        "PDG_FALLBACK_MEMORY_MB", "gateway", "gateway_server", "转换内存上限", kind="number",
+        default="2048", unit="MB", min_value=512, max_value=16384,
+        help="每个临时 Wine 容器可使用的最大内存。",
+    ),
+    Field(
+        "PDG_FALLBACK_CPUS", "gateway", "gateway_server", "转换 CPU 上限", kind="number",
+        default="2", unit="核", min_value=1, max_value=16,
+        help="每个临时 Wine 容器可使用的 CPU 核数。",
+    ),
+    Field(
         "BAIDU_GROUP_NAME", "gateway", "baidu_account", "目标群名称", default="读秀12群",
         essential=True, keep_blank=True,
         help="资源所在的百度网盘群名称。填了下面的群 GID 时这一项可以留空。",
@@ -236,6 +298,11 @@ FIELDS: tuple[Field, ...] = (
     Field(
         "BAIDU_SAVE_DIR", "gateway", "baidu_account", "网盘中转目录", default="/autobook_inbox",
         help="下载前先把群文件转存到自己网盘的这个目录，下载完成后自动删除。",
+    ),
+    Field(
+        "BAIDU_INBOX_ORPHAN_HOURS", "gateway", "baidu_account", "残留文件清理时限", kind="number",
+        default="6", unit="小时", min_value=1, max_value=720,
+        help="中转目录里超过这个时长仍未被删除的文件视为任务中断留下的残留，自动清除。不要小于单个任务可能的最长下载时间。",
     ),
     Field(
         "BAIDU_AUTH_FILE", "gateway", "baidu_account", "扫码凭据文件", kind="path",

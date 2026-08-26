@@ -93,6 +93,12 @@ class Config:
     drive_expire_days: int
     drive_require_upload_date_verify: bool
 
+    # --- automatic cleanup ---
+    cleanup_enabled: bool
+    cleanup_interval_hours: int
+    drive_cleanup_grace_days: int
+    baidu_inbox_orphan_hours: int
+
     # --- misc ---
     pdg_dpi: int
     full_sync_max_pages: int
@@ -105,6 +111,17 @@ class Config:
     gateway_concurrency: int
     gateway_cache_ttl_seconds: int
     gateway_job_root: Path
+
+    # --- proprietary PDG fallback (gateway side) ---
+    pdg_fallback_enabled: bool
+    pdg_fallback_image: str
+    pdg_fallback_docker_socket: Path
+    pdg_fallback_runtime_volume: str
+    pdg_fallback_job_root: Path
+    pdg_fallback_timeout_seconds: int
+    pdg_fallback_max_upload_mb: int
+    pdg_fallback_memory_mb: int
+    pdg_fallback_cpus: int
 
     @classmethod
     def load(cls) -> "Config":
@@ -159,6 +176,10 @@ class Config:
             drive_target_dir=_get("DRIVE_TARGET_DIR", "transfer"),
             drive_expire_days=_get_int("DRIVE_EXPIRE_DAYS", 7),
             drive_require_upload_date_verify=_get("DRIVE_REQUIRE_UPLOAD_DATE_VERIFY", "1") not in {"0", "false", "no"},
+            cleanup_enabled=_get("CLEANUP_ENABLED", "1") not in {"0", "false", "no"},
+            cleanup_interval_hours=_get_int("CLEANUP_INTERVAL_HOURS", 6),
+            drive_cleanup_grace_days=_get_int("DRIVE_CLEANUP_GRACE_DAYS", 1),
+            baidu_inbox_orphan_hours=_get_int("BAIDU_INBOX_ORPHAN_HOURS", 6),
             pdg_dpi=_get_int("PDG_DPI", 200),
             full_sync_max_pages=_get_int("FULL_SYNC_MAX_PAGES", 2000),
             gateway_bind=_get("GATEWAY_BIND", "127.0.0.1"),
@@ -168,6 +189,17 @@ class Config:
             gateway_concurrency=max(1, _get_int("GATEWAY_CONCURRENCY", 3)),
             gateway_cache_ttl_seconds=max(60, _get_int("GATEWAY_CACHE_TTL_SECONDS", 3600)),
             gateway_job_root=Path(_get("GATEWAY_JOB_ROOT", str(PROJECT_ROOT / "runtime" / "gateway" / "jobs"))),
+            pdg_fallback_enabled=_get("PDG_FALLBACK_ENABLED", "0").lower() not in {"0", "false", "no"},
+            pdg_fallback_image=_get("PDG_FALLBACK_IMAGE", "autobook-pdg2pic-wine:local"),
+            pdg_fallback_docker_socket=Path(_get("PDG_FALLBACK_DOCKER_SOCKET", "/var/run/docker.sock")),
+            pdg_fallback_runtime_volume=_get("PDG_FALLBACK_RUNTIME_VOLUME"),
+            pdg_fallback_job_root=Path(
+                _get("PDG_FALLBACK_JOB_ROOT", str(PROJECT_ROOT / "runtime" / "pdg-fallback" / "jobs"))
+            ),
+            pdg_fallback_timeout_seconds=max(60, _get_int("PDG_FALLBACK_TIMEOUT_SECONDS", 7200)),
+            pdg_fallback_max_upload_mb=max(16, _get_int("PDG_FALLBACK_MAX_UPLOAD_MB", 1024)),
+            pdg_fallback_memory_mb=max(512, _get_int("PDG_FALLBACK_MEMORY_MB", 2048)),
+            pdg_fallback_cpus=max(1, _get_int("PDG_FALLBACK_CPUS", 2)),
         )
         return cfg
 

@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import threading
+import types
 import unittest
 import urllib.error
 import urllib.request
@@ -143,6 +144,50 @@ class ActivityTests(unittest.TestCase):
         match = maintenance.DONE_RE.search("2026-01-01T00:01:00+0000 host py[1]: 任务 #42 完成: https://drive.test/s/x")
         self.assertIsNotNone(match)
         self.assertEqual(match.group(1), "42")
+
+
+class CleanupActionTests(unittest.TestCase):
+    """The maintenance button must preview by default and delete only on request."""
+
+    def setUp(self) -> None:
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        root = Path(self.folder.name)
+        self.settings = PanelSettings(
+            bind="127.0.0.1", port=0,
+            tls_cert=root / "admin.crt", tls_key=root / "admin.key",
+            state_file=root / "admin-state.json",
+            config_dir=root, install_dir=root,
+            install_env=root / "install.env",
+            gateway_env=root / "gateway.env", worker_env=root / "worker.env",
+            session_seconds=3600, public_host="127.0.0.1", role="worker",
+        )
+        self.spawned: dict = {}
+
+        class Recorder:
+            def spawn_command(inner, kind, title, command, cwd=None, env=None, timeout=3600):
+                self.spawned.update(kind=kind, title=title, command=command, env=env)
+                return types.SimpleNamespace(id="job-1", title=title)
+
+        self.manager = Recorder()
+
+    def test_preview_does_not_pass_execute(self) -> None:
+        job = maintenance.run_cleanup(self.settings, self.manager, execute=False)
+        self.assertNotIn("--execute", self.spawned["command"])
+        self.assertIn("storage_sweep.py", " ".join(self.spawned["command"]))
+        self.assertEqual(job.id, "job-1")
+
+    def test_deleting_passes_execute(self) -> None:
+        maintenance.run_cleanup(self.settings, self.manager, execute=True)
+        self.assertIn("--execute", self.spawned["command"])
+
+    def test_the_child_keeps_a_usable_environment(self) -> None:
+        # spawn_command replaces the environment wholesale; a bare one-key env
+        # would leave the child without PATH.
+        maintenance.run_cleanup(self.settings, self.manager, execute=False)
+        env = self.spawned["env"]
+        self.assertEqual(env["ADMIN_CONFIG_DIR"], str(self.settings.config_dir))
+        self.assertTrue(len(env) > 1)
 
 
 class ApiTests(unittest.TestCase):

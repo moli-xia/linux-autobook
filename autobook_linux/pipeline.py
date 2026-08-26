@@ -16,6 +16,8 @@ import threading
 import time
 from pathlib import Path
 
+import pikepdf
+
 from autobook_linux.archive import (
     ARCHIVE_SUFFIXES,
     extract_archive,
@@ -25,9 +27,11 @@ from autobook_linux.archive import (
 from autobook_linux.baidu_pan import BaiduPanClient
 from autobook_linux.config import Config
 from autobook_linux.gateway_client import BaiduGatewayClient
-from autobook_linux.library_index import LibraryIndex
+from autobook_linux.library_index import LibraryIndex, pick_best_file
 from autobook_linux.lookup import Lookup, LookupError
-from autobook_linux.lookup import from_task as lookup_from_task
+from autobook_linux.lookup import plan_from_task as lookup_plan
+from autobook_linux.lookup import queries_for
+from autobook_linux.pdg_crypto import pdg2pic_fallback_type
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "vendor"))
 from pdg2pdf import PdgConverter  # noqa: E402  (vendored, MIT, bj5/pdg2pdf_open)
@@ -123,14 +127,30 @@ class TaskPipeline:
         return self._gid
 
     # ------------------------------------------------------------------
+    def _search_locally(self, plan, progress_cb):
+        """The gateway-free equivalent of GatewayManager._resolve."""
+        assert self.index is not None
+        for lookup in plan:
+            for query in queries_for(lookup):
+                try:
+                    candidates = self.index.search(self.gid, query)
+                except Exception as exc:  # noqa: BLE001 - try the next form
+                    LOGGER.warning("检索 %r 失败: %s", query, exc)
+                    continue
+                item = pick_best_file(candidates, lookup.value, lookup.kind)
+                if item is not None:
+                    return item
+        return None
+
     def process(self, task: dict, progress_cb=lambda msg: None) -> dict:
         """Run one task end to end. Returns {"share_url":..., "pdf": Path}."""
         task_id = task.get("id")
         book_title = str(task.get("book_title") or task.get("keyword") or "")
         try:
-            lookup = lookup_from_task(task)
+            plan = lookup_plan(task)
         except LookupError as exc:
             raise PipelineError(str(exc)) from exc
+        lookup = plan[0]
         # Books imported from the netdisk catalogue often have no SS number;
         # the slug only names the working directory.
         ssno = lookup.value if lookup.kind == "ss" else ""
@@ -142,17 +162,19 @@ class TaskPipeline:
         dl_dir.mkdir(parents=True, exist_ok=True)
         try:
             if self.gateway is not None:
-                progress_cb(f"正在通过百度下载网关检索并下载 {lookup.label()}")
+                progress_cb(f"正在通过下载网关检索并下载 {lookup.label()}")
                 request_id = f"task-{task_id}-{task.get('lease_id') or task.get('token') or slug}"
                 downloaded, source_name = self.gateway.fetch(
-                    lookup.value, request_id, dl_dir, lookup.kind)
+                    lookup.value, request_id, dl_dir, lookup.kind,
+                    plan=[entry.as_payload() for entry in plan[1:]])
                 LOGGER.info("网关下载完成: %s", source_name)
             else:
-                progress_cb(f"正在群文件库检索 {lookup.label()}")
+                progress_cb(f"正在进行非标准文件检索 {lookup.label()}")
                 assert self.index is not None and self.baidu is not None
-                item = self.index.pick_best(self.gid, lookup.value, lookup.kind)
+                item = self._search_locally(plan, progress_cb)
                 if item is None:
-                    raise PipelineError(f"群文件库中未找到 {lookup.label()} 对应的文件")
+                    tried = "、".join(entry.label() for entry in plan)
+                    raise PipelineError(f"非标准文件检索未找到对应的文件（已尝试 {tried}）")
                 LOGGER.info("选中群文件: %s (size=%d msg_id=%s)", item.name, item.size, item.msg_id)
                 progress_cb(f"转存并下载 {item.name}")
                 downloaded = self.baidu.fetch_group_file(
@@ -288,12 +310,35 @@ class TaskPipeline:
             return target_pdf
 
         # 2) PDG folder -> convert
-        pdg_count = len(find_files_by_suffix(extract_dir, {".pdg"}))
-        if pdg_count == 0:
+        pdg_files = find_files_by_suffix(extract_dir, {".pdg"})
+        pdg_count = len(pdg_files)
+        if not pdg_files:
             detail = f"; 嵌套归档错误: {' | '.join(nested_errors[:3])}" if nested_errors else ""
             raise PipelineError(f"压缩包内未发现 PDF 或 PDG 文件: {downloaded.name}{detail}")
 
         LOGGER.info("开始 PDG 转换 (%d 页): %s", pdg_count, downloaded.name)
+        proprietary_types: set[int] = set()
+        for page in pdg_files:
+            with page.open("rb") as source:
+                marker = pdg2pic_fallback_type(source.read(16))
+            if marker is not None:
+                proprietary_types.add(marker)
+        if proprietary_types:
+            common_parent = Path(os.path.commonpath([str(page.resolve().parent) for page in pdg_files]))
+            markers = "/".join(f"{value:02X}H" for value in sorted(proprietary_types))
+            LOGGER.warning("检测到专有 PDG 类型 %s，转交网关按需 Wine 兜底", markers)
+            try:
+                self.gateway.convert_pdg_fallback(common_parent, target_pdf)
+                with pikepdf.open(target_pdf) as document:
+                    pages = len(document.pages)
+                if pages <= 0:
+                    raise PipelineError("Pdg2Pic 网关兜底生成的 PDF 没有页面")
+            except Exception as exc:
+                target_pdf.unlink(missing_ok=True)
+                raise PipelineError(f"专有 PDG {markers} 的 Pdg2Pic 网关兜底失败: {exc}") from exc
+            LOGGER.info("Pdg2Pic 网关兜底完成 (%d 页): %s", pages, target_pdf.name)
+            return target_pdf
+
         converter = PdgConverter(str(extract_dir), output_path=str(target_pdf), dpi=float(self.config.pdg_dpi))
         converter.convert()
         if not target_pdf.exists() or target_pdf.stat().st_size == 0:

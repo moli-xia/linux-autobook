@@ -20,9 +20,11 @@ from urllib.parse import quote, urlparse
 
 from autobook_linux.baidu_auth import BaiduCredentialStore, resolve_baidu_credentials
 from autobook_linux.baidu_pan import BaiduPanClient
+from autobook_linux import janitor
 from autobook_linux.config import Config
 from autobook_linux.library_index import pick_best_file
-from autobook_linux.lookup import Lookup, LookupError, validate
+from autobook_linux.lookup import Lookup, LookupError, queries_for, validate
+from autobook_linux.pdg_fallback import PdgFallbackError, PdgFallbackService
 
 LOGGER = logging.getLogger(__name__)
 _SSNO_RE = re.compile(r"^\d{8}$")
@@ -40,6 +42,10 @@ class GatewayJob:
     request_id: str
     ssno: str
     kind: str = "ss"
+    # Every usable key for this book, most precise first.  A job carrying an SS
+    # number and a title can still fall back to the title when the SS number
+    # finds nothing.
+    plan: list[Lookup] = field(default_factory=list)
     status: str = "pending"
     filename: str = ""
     artifact: Path | None = None
@@ -69,6 +75,7 @@ class GatewayManager:
             thread_name_prefix="baidu-gateway",
         )
         self._gid: str | None = config.baidu_group_gid or None
+        self.janitor = janitor.for_gateway(config, self._client)
 
     def _client(self) -> BaiduPanClient:
         credentials = self._credentials
@@ -97,8 +104,23 @@ class GatewayManager:
         self.root.mkdir(parents=True, exist_ok=True)
         LOGGER.info("百度下载网关预检成功 gid=%s", self._gid)
 
-    def submit(self, ssno: str, request_id: str, kind: str = "ss") -> GatewayJob:
+    def submit(
+        self,
+        ssno: str,
+        request_id: str,
+        kind: str = "ss",
+        plan: list[dict] | None = None,
+    ) -> GatewayJob:
         lookup = validate(kind, ssno)
+        # Older workers send only one key; newer ones send the whole plan.
+        lookups = [lookup]
+        for entry in plan or []:
+            try:
+                extra = validate(str(entry.get("kind") or ""), str(entry.get("value") or ""))
+            except LookupError:
+                continue
+            if extra not in lookups:
+                lookups.append(extra)
         if not _REQUEST_ID_RE.fullmatch(request_id):
             raise ValueError("request_id 格式无效")
         self.cleanup_expired()
@@ -112,11 +134,33 @@ class GatewayManager:
                 return existing
             job_id = uuid.uuid4().hex
             job = GatewayJob(job_id=job_id, request_id=request_id,
-                             ssno=lookup.value, kind=lookup.kind)
+                             ssno=lookup.value, kind=lookup.kind, plan=lookups)
             self._jobs[job_id] = job
             self._requests[request_id] = job_id
             self._executor.submit(self._run_job, job_id)
             return job
+
+    def _resolve(self, client, gid: str, job: "GatewayJob"):
+        """Search for the book, trying every key and every query form.
+
+        The group search matches the query as one phrase, so a title carrying
+        an author and a year has to be shortened before it finds anything.
+        Candidates are still judged against the full title, so a short query
+        cannot hand back a different book.
+        """
+        plan = job.plan or [Lookup(job.kind, job.ssno)]
+        for lookup in plan:
+            for query in queries_for(lookup):
+                try:
+                    candidates = client.search_group_files(gid, query)
+                except Exception as exc:  # noqa: BLE001 - try the next form
+                    LOGGER.warning("检索 %r 失败: %s", query, exc)
+                    continue
+                item = pick_best_file(candidates, lookup.value, lookup.kind)
+                if item is not None:
+                    return item, lookup
+                LOGGER.debug("检索 %r 无匹配（%d 条候选）", query, len(candidates))
+        return None, None
 
     def _run_job(self, job_id: str) -> None:
         with self._lock:
@@ -135,11 +179,11 @@ class GatewayManager:
             if not gid:
                 gid = client.resolve_gid(self.config.baidu_group_name)
                 self._gid = gid
-            candidates = client.search_group_files(gid, job.ssno)
-            item = pick_best_file(candidates, job.ssno, job.kind)
+            item, matched = self._resolve(client, gid, job)
             if item is None:
-                raise RuntimeError(
-                    f"群文件库中未找到 {Lookup(job.kind, job.ssno).label()} 对应的文件")
+                tried = "、".join(entry.label() for entry in (job.plan or [Lookup(job.kind, job.ssno)]))
+                raise RuntimeError(f"非标准文件检索未找到对应的文件（已尝试 {tried}）")
+            LOGGER.info("网关命中 job=%s 依据 %s -> %s", job_id, matched.label(), item.name)
             remote_dir = f"{self.config.baidu_save_dir.rstrip('/')}/gateway/{job_id}"
             safe_name = _safe_filename(item.name, job.ssno)
             artifact = client.fetch_group_file(
@@ -233,7 +277,11 @@ def _public_job(job: GatewayJob) -> dict[str, Any]:
     }
 
 
-def make_handler(manager: GatewayManager, token: str) -> type[BaseHTTPRequestHandler]:
+def make_handler(
+    manager: GatewayManager,
+    token: str,
+    pdg_fallback: PdgFallbackService | None = None,
+) -> type[BaseHTTPRequestHandler]:
     class GatewayHandler(BaseHTTPRequestHandler):
         server_version = "autobook-gateway/1.0"
 
@@ -269,7 +317,10 @@ def make_handler(manager: GatewayManager, token: str) -> type[BaseHTTPRequestHan
         def do_GET(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
             if path == "/health":
-                self._send_json(200, {"status": "ok", "jobs": manager.stats()})
+                payload: dict[str, Any] = {"status": "ok", "jobs": manager.stats()}
+                if pdg_fallback is not None:
+                    payload["pdg_fallback"] = pdg_fallback.status()
+                self._send_json(200, payload)
                 return
             if not self._require_auth():
                 return
@@ -301,7 +352,11 @@ def make_handler(manager: GatewayManager, token: str) -> type[BaseHTTPRequestHan
         def do_POST(self) -> None:  # noqa: N802
             if not self._require_auth():
                 return
-            if urlparse(self.path).path != "/v1/fetch":
+            path = urlparse(self.path).path
+            if path == "/v1/pdg-fallback":
+                self._handle_pdg_fallback()
+                return
+            if path != "/v1/fetch":
                 self._send_json(404, {"error": "not found"})
                 return
             try:
@@ -313,6 +368,7 @@ def make_handler(manager: GatewayManager, token: str) -> type[BaseHTTPRequestHan
                     str(payload.get("ssno") or ""),
                     str(payload.get("request_id") or ""),
                     str(payload.get("kind") or "ss"),
+                    payload.get("plan") if isinstance(payload.get("plan"), list) else None,
                 )
                 self._send_json(202, _public_job(job))
             except (ValueError, json.JSONDecodeError) as exc:
@@ -320,6 +376,42 @@ def make_handler(manager: GatewayManager, token: str) -> type[BaseHTTPRequestHan
             except Exception as exc:
                 LOGGER.exception("提交网关任务失败")
                 self._send_json(500, {"error": str(exc)[:500]})
+
+        def _handle_pdg_fallback(self) -> None:
+            if pdg_fallback is None or not pdg_fallback.enabled:
+                self._send_json(503, {"error": "Pdg2Pic Wine 兜底未启用"})
+                return
+            result = None
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                expected_sha256 = self.headers.get("X-Content-SHA256", "").strip()
+                if expected_sha256 and not re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha256):
+                    raise ValueError("X-Content-SHA256 格式无效")
+                result = pdg_fallback.convert(self.rfile, length, expected_sha256)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/pdf")
+                self.send_header("Content-Length", str(result.size))
+                self.send_header("Content-Disposition", "attachment; filename=pdg-fallback.pdf")
+                self.send_header("X-Content-SHA256", result.sha256)
+                self.send_header("X-PDF-Pages", str(result.pages))
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                with result.pdf.open("rb") as source:
+                    shutil.copyfileobj(source, self.wfile, length=1024 * 1024)
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+            except PdgFallbackError as exc:
+                LOGGER.warning("Pdg2Pic 兜底失败: %s", exc)
+                self._send_json(422, {"error": str(exc)[:1000]})
+            except (BrokenPipeError, ConnectionResetError):
+                LOGGER.warning("Pdg2Pic 兜底结果发送时客户端已断开")
+            except Exception as exc:
+                LOGGER.exception("Pdg2Pic 兜底请求失败")
+                self._send_json(500, {"error": str(exc)[:500]})
+            finally:
+                if result is not None:
+                    pdg_fallback.cleanup(result)
 
         def do_DELETE(self) -> None:  # noqa: N802
             if not self._require_auth():
@@ -335,13 +427,20 @@ def make_handler(manager: GatewayManager, token: str) -> type[BaseHTTPRequestHan
 
 
 def serve_gateway(config: Config, manager: GatewayManager) -> None:
+    pdg_fallback = PdgFallbackService(config)
     server = ThreadingHTTPServer(
         (config.gateway_bind, config.gateway_port),
-        make_handler(manager, config.baidu_gateway_token),
+        make_handler(manager, config.baidu_gateway_token, pdg_fallback),
     )
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(str(config.gateway_tls_cert), str(config.gateway_tls_key))
     server.socket = context.wrap_socket(server.socket, server_side=True)
     LOGGER.info("百度下载网关监听 https://%s:%d", config.gateway_bind, config.gateway_port)
-    server.serve_forever(poll_interval=0.5)
+    # The gateway owns the Baidu session, so it is the role that can prune the
+    # transfer inbox of files stranded by timed-out or crashed tasks.
+    manager.janitor.start()
+    try:
+        server.serve_forever(poll_interval=0.5)
+    finally:
+        manager.janitor.stop()

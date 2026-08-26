@@ -44,7 +44,11 @@ sudo bash install.sh             # 交互菜单，全部回车即可
 ## 功能概览
 
 - 无需 Windows、百度网盘桌面客户端或 GUI 自动化，可在纯命令行 Linux 上运行。
-- 使用群文件库的服务端搜索接口按 SS 号检索，不需要递归扫描数百万文件。
+- 使用服务端搜索接口按 SS 号检索，不需要递归扫描数百万文件。
+- 支持 SS 号、ISBN、仅书名三种检索方式，并按精确度依次回退：SS 号搜不到时自动改用 ISBN，再不行用书名。
+- 书名检索会自动缩短查询（去掉作者、年份，必要时取书名片段），并用完整书名校验候选文件，绝不投递另一本书。
+- 搜索接口对同一请求约有一半概率返回空结果，因此空结果会自动重试后才判定为「未找到」。
+- 面板可查看全站任务由哪台服务器执行，网关主服务器还能删除或按状态清空任务。
 - 单个 Worker 内置线程池，可同时处理多个独立任务；默认并发数为 3。
 - 支持多台 Linux Worker 横向扩展；百度 Cookie 只保存在中心下载网关。
 - 网站任务使用 5 分钟可续租租约；Worker 每 60 秒心跳，宕机任务最多自动重排 3 次。
@@ -59,9 +63,11 @@ sudo bash install.sh             # 交互菜单，全部回车即可
 - 支持 PDF 直传以及 ZIP、UVZ、RAR/RAR5、7z、tar、gzip、bzip2、xz、CBZ 等归档格式。
 - 支持最多 3 层、每层最多 32 个嵌套压缩包，扩展名不正确时也会检查文件头。
 - 支持无密码和密码字典解压。
-- 支持常见超星 PDG 页面、书籍元数据和目录写入；任何页面解码失败都会中止任务，不生成空白占位页冒充成功。
+- 支持常见超星 PDG 页面、书籍元数据和目录写入；普通页面解码失败仍会中止任务，不生成空白占位页冒充成功。
+- 对文件头明确为 `HH 04H` 的专有 PDG，Worker 可将已解压页面交给中心网关按需启动 Pdg2PicAuto/Wine 兜底；只有确认的 04H 才会走此路径，未知类型、损坏文件和普通解析失败不会扩大触发范围。
 - 上传到 Cloudreve 后创建限时分享链接，并将进度、成功结果或错误回报给任务网站。
 - 每个任务使用独立工作目录，结束后自动清理本地中间文件。
+- 自动回收网盘空间：分享到期的成品文件和转存目录里的残留文件都会定期删除，面板可先预览再执行。
 
 ## 已验证的完整流程
 
@@ -71,9 +77,10 @@ sudo bash install.sh             # 交互菜单，全部回车即可
 - 百度 CDN 对整文件和 8 MiB Range 返回 HTTP 403 时，4 MiB 顺序 Range 回退能够完整下载并通过大小校验。
 - 上传后的分享文件重新下载验证：文件大小与网盘元数据一致，PDF 可正常打开，242/242 页内容非空。
 - 三任务并发验证：SS `12607753`、`14686528`、`13128895` 在 1 秒内全部进入处理状态，分别在 15、19、34 秒后完成；两个 PDF 直传任务和一个 UVZ/242 页 PDG 转换任务均成功生成分享文件。
-- 本地、Linux 服务器与镜像构建过程中的测试套件均通过 99 项测试。
+- 本地测试套件通过 332 项测试，另有 25 项因当前环境缺少 POSIX/OpenSSL 条件跳过。
 - 分布式版本验证：12 个并发 claim 请求争抢 6 条合成任务时，恰好得到 6 个不同任务和 6 个不同租约；合法心跳全部续租，伪造租约、完成后的重复回调均被拒绝。
 - 中心网关真实取件验证：SS `12607753` 经群搜索、百度下载、HTTPS 流式传输及 SHA-256 校验，取得 17,584,393 字节 PDF，随后网关与 Worker 临时文件均被清理。
+- 真实 04H 兜底验证：215 个 PDG 页面经独立 Worker、HTTPS 网关和临时 Wine 容器转换为 215 页有效 PDF；转换容器和网关临时任务目录在响应后均被清理。
 
 以上记录用于说明已覆盖的路径，不保证任何百度接口、第三方网站或所有 PDG 变体永久兼容。
 
@@ -93,6 +100,10 @@ sudo bash install.sh             # 交互菜单，全部回车即可
         │
         ▼
 PDF 直传 或 7z 解压 / 嵌套解压 / PDG 解码合并
+        │
+        ├─ 文件头为 HH 04H ─► Worker 上传页面 ─► 网关临时启动 Wine/Pdg2PicAuto ─► PDF
+        │
+        └─ 其它类型或普通解析错误 ─► 原有解码路径（失败即报告错误）
         │
         ▼
 Cloudreve 分片上传 ──► 创建限时分享链接
@@ -140,7 +151,34 @@ Cloudreve 分片上传 ──► 创建限时分享链接
 - 11H：校验页面数据区后转换为兼容的 00H 标记；
 - 实际为 JPG、PNG、TIFF 等标准图像但使用 `.pdg` 后缀的页面。
 
-04H、05H、6xH、AxH、FFH 等未覆盖或未取得真实样本验证的变体会明确失败并回报错误。转换器不会用空白 TIFF 替代无法解码的页面。
+05H、6xH、AxH、FFH 以及无法确认文件头的变体仍会明确失败并回报错误。`04H` 只有在 Worker 和网关两侧都确认后才会进入 Pdg2PicAuto 兜底。转换器不会用空白 TIFF 替代无法解码的页面。
+
+#### 04H Pdg2PicAuto 兜底
+
+Pdg2PicAuto 是专有 Windows 程序，不随 Git 仓库发布。需要在网关上把已有程序目录放入构建上下文：
+
+```text
+pdg2pic-wine/app/Pdg2PicAuto/Pdg2Pic/Pdg2Pic.exe
+```
+
+然后构建 32 位 Wine 镜像：
+
+```bash
+docker build --platform linux/386 \
+  -t autobook-pdg2pic-wine:local pdg2pic-wine
+```
+
+只在中心网关开启兜底，并配置临时转换镜像：
+
+```dotenv
+AUTOBOOK_PDG_FALLBACK_ENABLED=1
+AUTOBOOK_PDG_FALLBACK_IMAGE=autobook-pdg2pic-wine:local
+AUTOBOOK_PDG_FALLBACK_RUNTIME_VOLUME=autobook-docker_autobook-runtime
+```
+
+Docker 网关需要额外挂载 `/var/run/docker.sock`，以便通过 Docker Engine API 按请求创建临时容器。临时容器使用 `network=none`、CPU/内存/PID 限制、`CapDrop=ALL` 和 `no-new-privileges`，只绑定运行数据卷，不绑定包含令牌和 Cookie 的配置卷；任务完成后自动删除。不要把 `PDG2PIC_FALLBACK_HH_TYPES` 改成“所有不支持类型”的反向列表。
+
+如果没有构建 Pdg2PicAuto 镜像或没有开启网关兜底，04H 会按普通不可解析页面失败，不会生成伪造的空白 PDF。
 
 ## 系统要求
 
@@ -401,6 +439,30 @@ sudo autobook --action update
 | `DRIVE_TARGET_DIR` | `transfer` | 上传目标目录 |
 | `DRIVE_EXPIRE_DAYS` | `7` | 分享链接有效天数 |
 | `DRIVE_REQUIRE_UPLOAD_DATE_VERIFY` | `1` | 上传后必须验证文件日期，避免异常的 1970 时间 |
+
+### 存储清理
+
+分享到期不会删除文件，转存目录也会因任务超时或中断留下残留，两处都需要定期回收。
+服务启动 2 分钟后执行第一次清理，之后按 `CLEANUP_INTERVAL_HOURS` 重复：Worker 清理结果网盘，
+网关清理百度转存目录。判断依据是文件**上传到网盘的时间**，不是文件自身的修改时间。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `CLEANUP_ENABLED` | `1` | 设为 `0` 关闭自动清理，改为手动执行 |
+| `CLEANUP_INTERVAL_HOURS` | `6` | 两次清理之间的间隔 |
+| `DRIVE_CLEANUP_GRACE_DAYS` | `1` | 分享失效后额外保留的天数，用于兜住时钟误差 |
+| `BAIDU_INBOX_ORPHAN_HOURS` | `6` | 转存目录中停留超过该时长的文件视为残留（网关侧） |
+
+百度侧的删除可能返回 `errno=132`，表示该账号需要先完成一次安全验证才允许文件管理操作。
+这时日志会明确写出原因和处理办法：用百度网盘 App 完成一次安全验证后重新扫码登录。
+结果网盘的清理不受影响。
+
+也可以手动执行，或在面板「维护」页点按钮：
+
+```bash
+python3 tools/storage_sweep.py            # 预览，不删除
+python3 tools/storage_sweep.py --execute  # 真正删除
+```
 
 ### PDF
 
