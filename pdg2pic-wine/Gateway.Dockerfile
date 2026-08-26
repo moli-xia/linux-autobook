@@ -1,6 +1,6 @@
 FROM ghcr.io/moli-xia/linux-autobook:latest
 
-# Small deployment overlay for the gateway/worker protocol and strict 04H
+# Small deployment overlay for the gateway/worker protocol and on-demand PDG
 # routing. The large application image remains the published upstream base.
 COPY autobook_linux/config.py /opt/autobook-linux/autobook_linux/config.py
 COPY autobook_linux/gateway_client.py /opt/autobook-linux/autobook_linux/gateway_client.py

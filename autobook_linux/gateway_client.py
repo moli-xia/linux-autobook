@@ -139,7 +139,7 @@ class BaiduGatewayClient:
                 LOGGER.warning("网关任务清理失败 job=%s: %s", job_id, exc)
 
     def convert_pdg_fallback(self, source_dir: Path, target_pdf: Path) -> Path:
-        """Upload an extracted proprietary-PDG folder and receive its PDF.
+        """Upload an extracted PDG folder and receive its fallback PDF.
 
         The upload is an unencrypted, path-safe ZIP created by the Worker. The
         central gateway extracts it and starts the Wine container only for the

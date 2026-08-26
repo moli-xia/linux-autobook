@@ -12,7 +12,7 @@ if str(LINUX_ROOT) not in sys.path:
 from autobook_linux.pdg_crypto import (
     decrypt_03h_to_00h,
     normalize_legacy_pdg,
-    pdg2pic_fallback_type,
+    pdg2pic_direct_type,
     unsupported_pdg_type,
     unwrap_simple_jpeg,
 )
@@ -68,10 +68,10 @@ class UnsupportedTypeTests(unittest.TestCase):
         # The exact variant seen in 尤怡研究文集 (header "HH ... 04").
         self.assertEqual(unsupported_pdg_type(self._hh(0x04)), 0x04)
 
-    def test_only_confirmed_04h_is_routed_to_pdg2pic(self) -> None:
-        self.assertEqual(pdg2pic_fallback_type(self._hh(0x04)), 0x04)
+    def test_only_confirmed_04h_bypasses_the_open_decoder(self) -> None:
+        self.assertEqual(pdg2pic_direct_type(self._hh(0x04)), 0x04)
         for marker in (0x00, 0x02, 0x03, 0x05, 0x11, 0x60, 0x6A, 0xA0, 0xFF):
-            self.assertIsNone(pdg2pic_fallback_type(self._hh(marker)))
+            self.assertIsNone(pdg2pic_direct_type(self._hh(marker)))
 
     def test_other_proprietary_families_are_reported(self) -> None:
         for marker in (0x05, 0x60, 0x6A, 0xA0, 0xFF):

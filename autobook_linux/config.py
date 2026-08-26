@@ -112,7 +112,7 @@ class Config:
     gateway_cache_ttl_seconds: int
     gateway_job_root: Path
 
-    # --- proprietary PDG fallback (gateway side) ---
+    # --- failed PDG conversion fallback (gateway side) ---
     pdg_fallback_enabled: bool
     pdg_fallback_image: str
     pdg_fallback_docker_socket: Path

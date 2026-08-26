@@ -63,8 +63,8 @@ sudo bash install.sh             # 交互菜单，全部回车即可
 - 支持 PDF 直传以及 ZIP、UVZ、RAR/RAR5、7z、tar、gzip、bzip2、xz、CBZ 等归档格式。
 - 支持最多 3 层、每层最多 32 个嵌套压缩包，扩展名不正确时也会检查文件头。
 - 支持无密码和密码字典解压。
-- 支持常见超星 PDG 页面、书籍元数据和目录写入；普通页面解码失败仍会中止任务，不生成空白占位页冒充成功。
-- 对文件头明确为 `HH 04H` 的专有 PDG，Worker 可将已解压页面交给中心网关按需启动 Pdg2PicAuto/Wine 兜底；只有确认的 04H 才会走此路径，未知类型、损坏文件和普通解析失败不会扩大触发范围。
+- 支持常见超星 PDG 页面、书籍元数据和目录写入；开放转换器报错、输出无效或页数不完整时，会把整本 PDG 交给中心网关按需启动 Pdg2PicAuto/Wine 再尝试一次。
+- 文件头明确为 `HH 04H` 的专有 PDG 会直接进入 Wine 兜底；其他 PDG 仍优先使用开放转换器。两条路径都会核对 PDF 可读性和页数，不会用空白占位页冒充成功。
 - 上传到 Cloudreve 后创建限时分享链接，并将进度、成功结果或错误回报给任务网站。
 - 每个任务使用独立工作目录，结束后自动清理本地中间文件。
 - 自动回收网盘空间：分享到期的成品文件和转存目录里的残留文件都会定期删除，面板可先预览再执行。
@@ -77,7 +77,7 @@ sudo bash install.sh             # 交互菜单，全部回车即可
 - 百度 CDN 对整文件和 8 MiB Range 返回 HTTP 403 时，4 MiB 顺序 Range 回退能够完整下载并通过大小校验。
 - 上传后的分享文件重新下载验证：文件大小与网盘元数据一致，PDF 可正常打开，242/242 页内容非空。
 - 三任务并发验证：SS `12607753`、`14686528`、`13128895` 在 1 秒内全部进入处理状态，分别在 15、19、34 秒后完成；两个 PDF 直传任务和一个 UVZ/242 页 PDG 转换任务均成功生成分享文件。
-- 本地测试套件通过 332 项测试，另有 25 项因当前环境缺少 POSIX/OpenSSL 条件跳过。
+- 本地测试套件通过 338 项测试，另有 25 项因当前环境缺少 POSIX/OpenSSL 条件跳过。
 - 分布式版本验证：12 个并发 claim 请求争抢 6 条合成任务时，恰好得到 6 个不同任务和 6 个不同租约；合法心跳全部续租，伪造租约、完成后的重复回调均被拒绝。
 - 中心网关真实取件验证：SS `12607753` 经群搜索、百度下载、HTTPS 流式传输及 SHA-256 校验，取得 17,584,393 字节 PDF，随后网关与 Worker 临时文件均被清理。
 - 真实 04H 兜底验证：215 个 PDG 页面经独立 Worker、HTTPS 网关和临时 Wine 容器转换为 215 页有效 PDF；转换容器和网关临时任务目录在响应后均被清理。
@@ -101,9 +101,9 @@ sudo bash install.sh             # 交互菜单，全部回车即可
         ▼
 PDF 直传 或 7z 解压 / 嵌套解压 / PDG 解码合并
         │
-        ├─ 文件头为 HH 04H ─► Worker 上传页面 ─► 网关临时启动 Wine/Pdg2PicAuto ─► PDF
-        │
-        └─ 其它类型或普通解析错误 ─► 原有解码路径（失败即报告错误）
+        ├─ 文件头为 HH 04H ─► 直接请求网关 Wine/Pdg2PicAuto
+        ├─ 其它 PDG ─► 开放转换器成功 ─► PDF
+        └─ 开放转换报错 / 输出无效 / 页数不完整 ─► 网关临时启动 Wine/Pdg2PicAuto ─► PDF
         │
         ▼
 Cloudreve 分片上传 ──► 创建限时分享链接
@@ -151,9 +151,9 @@ Cloudreve 分片上传 ──► 创建限时分享链接
 - 11H：校验页面数据区后转换为兼容的 00H 标记；
 - 实际为 JPG、PNG、TIFF 等标准图像但使用 `.pdg` 后缀的页面。
 
-05H、6xH、AxH、FFH 以及无法确认文件头的变体仍会明确失败并回报错误。`04H` 只有在 Worker 和网关两侧都确认后才会进入 Pdg2PicAuto 兜底。转换器不会用空白 TIFF 替代无法解码的页面。
+`04H` 是已确认必须使用 Pdg2PicAuto 的类型，因此不再浪费时间尝试开放解码。05H、6xH、AxH、FFH、损坏页面以及无法确认文件头的变体会先由开放转换器处理；只要整本转换报错、PDF 无效或输出页数与 PDG 文件数不一致，就把整本书交给 Pdg2PicAuto 再尝试一次。Wine 仍失败时会同时报告两条转换路径的错误，不会生成空白页或不完整 PDF 冒充成功。
 
-#### 04H Pdg2PicAuto 兜底
+#### PDG 转换失败 Pdg2PicAuto 兜底
 
 Pdg2PicAuto 是专有 Windows 程序，不随 Git 仓库发布。需要在网关上把已有程序目录放入构建上下文：
 
@@ -176,9 +176,9 @@ AUTOBOOK_PDG_FALLBACK_IMAGE=autobook-pdg2pic-wine:local
 AUTOBOOK_PDG_FALLBACK_RUNTIME_VOLUME=autobook-docker_autobook-runtime
 ```
 
-Docker 网关需要额外挂载 `/var/run/docker.sock`，以便通过 Docker Engine API 按请求创建临时容器。临时容器使用 `network=none`、CPU/内存/PID 限制、`CapDrop=ALL` 和 `no-new-privileges`，只绑定运行数据卷，不绑定包含令牌和 Cookie 的配置卷；任务完成后自动删除。不要把 `PDG2PIC_FALLBACK_HH_TYPES` 改成“所有不支持类型”的反向列表。
+Docker 网关需要额外挂载 `/var/run/docker.sock`，以便通过 Docker Engine API 按请求创建临时容器。临时容器使用 `network=none`、CPU/内存/PID 限制、`CapDrop=ALL` 和 `no-new-privileges`，只绑定运行数据卷，不绑定包含令牌和 Cookie 的配置卷；任务完成后自动删除。同一网关一次只运行一个 Pdg2Pic 兜底，避免多个 Wine GUI 同时耗尽内存。
 
-如果没有构建 Pdg2PicAuto 镜像或没有开启网关兜底，04H 会按普通不可解析页面失败，不会生成伪造的空白 PDF。
+该兜底只处理已经成功下载并解压、且确实包含 PDG 页面的书籍；搜索失败、下载失败、压缩包密码错误、没有 PDG、上传失败等问题不会启动 Wine，因为 Pdg2PicAuto 无法修复这些阶段。如果没有构建镜像或没有开启网关兜底，系统会保留并报告开放转换器的原始错误以及兜底不可用原因。
 
 ## 系统要求
 

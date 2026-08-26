@@ -1,10 +1,11 @@
-# Pdg2PicAuto 04H fallback
+# Pdg2PicAuto on-demand PDG fallback
 
 This directory packages the native 32-bit `Pdg2Pic.exe` program in a Wine
-container for the central gateway. It is not a resident service. The gateway
-creates one networkless, resource-limited container when a Worker has already
-identified an `HH` PDG page whose type byte is exactly `0x04`; the container is
-removed after the PDF response is sent.
+container for the central gateway. It is not a resident service. A confirmed
+`HH 04H` page is sent here immediately; every other PDG book is sent only after
+the open decoder fails, produces an invalid PDF, or returns an incomplete page
+count. The gateway creates one networkless, resource-limited container for the
+request and removes it after the PDF response is sent.
 
 The proprietary application is intentionally not copied into this repository.
 For a build, stage the existing `Pdg2PicAuto/Pdg2Pic` directory at
@@ -24,5 +25,7 @@ PDG_FALLBACK_DOCKER_SOCKET=/var/run/docker.sock
 PDG_FALLBACK_RUNTIME_VOLUME=autobook-docker_autobook-runtime
 ```
 
-Do not broaden `PDG2PIC_FALLBACK_HH_TYPES` into an inverse support list. Parse
-errors, damaged files, and unknown markers must continue to fail normally.
+The endpoint accepts only path-safe ZIP uploads that contain PDG pages. It
+validates that the result is a readable, non-empty PDF with exactly one output
+page per input PDG page. Search, download, archive extraction, and upload errors
+remain outside this fallback because Pdg2Pic cannot repair those stages.

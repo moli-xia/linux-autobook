@@ -1,4 +1,4 @@
-"""On-demand Wine/Docker fallback for proprietary Chaoxing PDG variants."""
+"""On-demand Wine/Docker fallback for PDG conversions the open decoder cannot finish."""
 from __future__ import annotations
 
 import hashlib
@@ -22,8 +22,6 @@ from urllib.parse import quote
 import pikepdf
 
 from autobook_linux.config import Config
-from autobook_linux.pdg_crypto import pdg2pic_fallback_type
-
 LOGGER = logging.getLogger(__name__)
 
 
@@ -144,20 +142,20 @@ def _safe_extract_zip(archive: Path, target: Path, max_unpacked_bytes: int) -> i
             destination.parent.mkdir(parents=True, exist_ok=True)
             with source.open(member) as reader, destination.open("wb") as writer:
                 shutil.copyfileobj(reader, writer, length=1024 * 1024)
-    if files == 0 or not any(target.rglob("*.pdg")):
+    if files == 0 or not any(
+        path.is_file() and not path.is_symlink() and path.suffix.lower() == ".pdg"
+        for path in target.rglob("*")
+    ):
         raise PdgFallbackError("PDG 兜底包内没有 PDG 页面")
     return files
 
 
-def _confirmed_04h_pages(target: Path) -> int:
-    confirmed = 0
-    for page in target.rglob("*.pdg"):
-        if not page.is_file() or page.is_symlink():
-            continue
-        with page.open("rb") as source:
-            if pdg2pic_fallback_type(source.read(16)) == 0x04:
-                confirmed += 1
-    return confirmed
+def _pdg_page_count(target: Path) -> int:
+    return sum(
+        1
+        for page in target.rglob("*")
+        if page.is_file() and not page.is_symlink() and page.suffix.lower() == ".pdg"
+    )
 
 
 @dataclass(frozen=True)
@@ -272,14 +270,14 @@ class PdgFallbackService:
             try:
                 self._receive(stream, length, archive, expected_sha256)
                 file_count = _safe_extract_zip(archive, input_dir, limit * 8)
-                confirmed_pages = _confirmed_04h_pages(input_dir)
-                if confirmed_pages == 0:
-                    raise PdgFallbackError("PDG 兜底包内没有文件头明确为 HH 04H 的页面")
+                pdg_pages = _pdg_page_count(input_dir)
+                if pdg_pages == 0:
+                    raise PdgFallbackError("PDG 兜底包内没有 PDG 页面")
                 LOGGER.info(
-                    "Pdg2Pic 兜底开始 job=%s files=%d confirmed_04h=%d",
+                    "Pdg2Pic 兜底开始 job=%s files=%d pdg_pages=%d",
                     job_dir.name,
                     file_count,
-                    confirmed_pages,
+                    pdg_pages,
                 )
                 self._run_container(job_dir, input_dir, output)
                 if not output.is_file() or output.stat().st_size <= 8 or not output.read_bytes()[:5] == b"%PDF-":
@@ -288,6 +286,8 @@ class PdgFallbackService:
                     pages = len(document.pages)
                 if pages <= 0:
                     raise PdgFallbackError("Pdg2Pic Wine 输出 PDF 没有页面")
+                if pages != pdg_pages:
+                    raise PdgFallbackError(f"Pdg2Pic Wine 输出页数不完整: 期望 {pdg_pages}，实际 {pages}")
                 digest = hashlib.sha256(output.read_bytes()).hexdigest()
                 LOGGER.info("Pdg2Pic 兜底完成 job=%s pages=%d size=%d", job_dir.name, pages, output.stat().st_size)
                 return PdgFallbackResult(job_dir, output, output.stat().st_size, digest, pages)

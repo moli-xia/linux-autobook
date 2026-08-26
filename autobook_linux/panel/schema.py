@@ -239,9 +239,9 @@ FIELDS: tuple[Field, ...] = (
         help="网关下载文件的暂存目录，过期后自动清理。",
     ),
     Field(
-        "PDG_FALLBACK_ENABLED", "gateway", "gateway_server", "04H Wine 兜底", kind="select",
+        "PDG_FALLBACK_ENABLED", "gateway", "gateway_server", "PDG 转换 Wine 兜底", kind="select",
         default="0", options=(("1", "开启"), ("0", "关闭")),
-        help="只对文件头明确为 HH 04H 的 PDG 启动临时 Pdg2Pic 容器；普通解析失败和未知格式不会调用。",
+        help="HH 04H 直接调用；其他 PDG 在开放转换器报错、输出无效或页数不完整时启动临时 Pdg2Pic 容器。",
     ),
     Field(
         "PDG_FALLBACK_IMAGE", "gateway", "gateway_server", "Pdg2Pic 容器镜像",
@@ -260,17 +260,17 @@ FIELDS: tuple[Field, ...] = (
         example="autobook-docker_autobook-runtime",
     ),
     Field(
-        "PDG_FALLBACK_JOB_ROOT", "gateway", "gateway_server", "04H 临时任务目录", kind="path",
+        "PDG_FALLBACK_JOB_ROOT", "gateway", "gateway_server", "PDG 兜底临时目录", kind="path",
         default="/opt/autobook-linux/runtime/pdg-fallback/jobs",
         help="上传的 PDG 与转换结果所在目录；响应发送完成后自动删除。",
     ),
     Field(
-        "PDG_FALLBACK_TIMEOUT_SECONDS", "gateway", "gateway_server", "04H 转换超时", kind="number",
+        "PDG_FALLBACK_TIMEOUT_SECONDS", "gateway", "gateway_server", "PDG 兜底转换超时", kind="number",
         default="7200", unit="秒", min_value=60, max_value=86400,
-        help="单本 04H 书籍允许 Pdg2Pic 运行的最长时间。",
+        help="单本 PDG 书籍允许 Pdg2Pic 运行的最长时间。",
     ),
     Field(
-        "PDG_FALLBACK_MAX_UPLOAD_MB", "gateway", "gateway_server", "04H 上传上限", kind="number",
+        "PDG_FALLBACK_MAX_UPLOAD_MB", "gateway", "gateway_server", "PDG 兜底上传上限", kind="number",
         default="1024", unit="MB", min_value=16, max_value=8192,
         help="Worker 上传到网关的单本 PDG 压缩包大小上限。",
     ),

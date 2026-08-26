@@ -31,7 +31,7 @@ from autobook_linux.library_index import LibraryIndex, pick_best_file
 from autobook_linux.lookup import Lookup, LookupError
 from autobook_linux.lookup import plan_from_task as lookup_plan
 from autobook_linux.lookup import queries_for
-from autobook_linux.pdg_crypto import pdg2pic_fallback_type
+from autobook_linux.pdg_crypto import pdg2pic_direct_type
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "vendor"))
 from pdg2pdf import PdgConverter  # noqa: E402  (vendored, MIT, bj5/pdg2pdf_open)
@@ -245,6 +245,21 @@ class TaskPipeline:
         shutil.copy2(downloaded, delivered)
         return delivered
 
+    def _convert_pdg_with_wine(self, source_dir: Path, target_pdf: Path, expected_pages: int) -> int:
+        """Run the gateway's ephemeral Pdg2Pic container and validate its PDF."""
+        if self.gateway is None:
+            raise PipelineError("当前 Worker 未配置中心网关，无法调用 Pdg2Pic Wine 兜底")
+        self.gateway.convert_pdg_fallback(source_dir, target_pdf)
+        if not target_pdf.is_file() or target_pdf.stat().st_size <= 8:
+            raise PipelineError("Pdg2Pic 网关兜底未生成有效 PDF")
+        with pikepdf.open(target_pdf) as document:
+            pages = len(document.pages)
+        if pages <= 0:
+            raise PipelineError("Pdg2Pic 网关兜底生成的 PDF 没有页面")
+        if pages != expected_pages:
+            raise PipelineError(f"Pdg2Pic 网关兜底页数不完整: 期望 {expected_pages}，实际 {pages}")
+        return pages
+
     def _to_pdf(self, downloaded: Path, job_dir: Path, ssno: str, book_title: str) -> Path:
         suffix = downloaded.suffix.lower()
         target_name = preferred_pdf_name(book_title, ssno, downloaded.stem)
@@ -317,30 +332,43 @@ class TaskPipeline:
             raise PipelineError(f"压缩包内未发现 PDF 或 PDG 文件: {downloaded.name}{detail}")
 
         LOGGER.info("开始 PDG 转换 (%d 页): %s", pdg_count, downloaded.name)
-        proprietary_types: set[int] = set()
+        direct_types: set[int] = set()
         for page in pdg_files:
             with page.open("rb") as source:
-                marker = pdg2pic_fallback_type(source.read(16))
+                marker = pdg2pic_direct_type(source.read(16))
             if marker is not None:
-                proprietary_types.add(marker)
-        if proprietary_types:
-            common_parent = Path(os.path.commonpath([str(page.resolve().parent) for page in pdg_files]))
-            markers = "/".join(f"{value:02X}H" for value in sorted(proprietary_types))
-            LOGGER.warning("检测到专有 PDG 类型 %s，转交网关按需 Wine 兜底", markers)
+                direct_types.add(marker)
+        common_parent = Path(os.path.commonpath([str(page.resolve().parent) for page in pdg_files]))
+        if direct_types:
+            markers = "/".join(f"{value:02X}H" for value in sorted(direct_types))
+            LOGGER.warning("检测到已知专有 PDG 类型 %s，直接转交网关按需 Wine 兜底", markers)
             try:
-                self.gateway.convert_pdg_fallback(common_parent, target_pdf)
-                with pikepdf.open(target_pdf) as document:
-                    pages = len(document.pages)
-                if pages <= 0:
-                    raise PipelineError("Pdg2Pic 网关兜底生成的 PDF 没有页面")
+                pages = self._convert_pdg_with_wine(common_parent, target_pdf, pdg_count)
             except Exception as exc:
                 target_pdf.unlink(missing_ok=True)
                 raise PipelineError(f"专有 PDG {markers} 的 Pdg2Pic 网关兜底失败: {exc}") from exc
             LOGGER.info("Pdg2Pic 网关兜底完成 (%d 页): %s", pages, target_pdf.name)
             return target_pdf
 
-        converter = PdgConverter(str(extract_dir), output_path=str(target_pdf), dpi=float(self.config.pdg_dpi))
-        converter.convert()
-        if not target_pdf.exists() or target_pdf.stat().st_size == 0:
-            raise PipelineError("PDG 转换后未生成有效 PDF")
-        return target_pdf
+        try:
+            converter = PdgConverter(str(extract_dir), output_path=str(target_pdf), dpi=float(self.config.pdg_dpi))
+            converter.convert()
+            if not target_pdf.is_file() or target_pdf.stat().st_size <= 8:
+                raise PipelineError("开放 PDG 转换器未生成有效 PDF")
+            with pikepdf.open(target_pdf) as document:
+                pages = len(document.pages)
+            if pages != pdg_count:
+                raise PipelineError(f"开放 PDG 转换器页数不完整: 期望 {pdg_count}，实际 {pages}")
+            return target_pdf
+        except Exception as primary_exc:
+            target_pdf.unlink(missing_ok=True)
+            LOGGER.warning("开放 PDG 转换失败，转交网关按需 Wine 兜底: %s", primary_exc)
+            try:
+                pages = self._convert_pdg_with_wine(common_parent, target_pdf, pdg_count)
+            except Exception as fallback_exc:
+                target_pdf.unlink(missing_ok=True)
+                raise PipelineError(
+                    f"PDG 开放转换失败: {primary_exc}; Pdg2Pic Wine 兜底也失败: {fallback_exc}"
+                ) from fallback_exc
+            LOGGER.info("Pdg2Pic 网关兜底完成 (%d 页): %s", pages, target_pdf.name)
+            return target_pdf
